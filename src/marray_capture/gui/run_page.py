@@ -167,9 +167,7 @@ class RunPage(QWidget):
         self.runner = SessionRunner(
             self.settings, plan, session, renderer, hooks, only_take_ids=only_take_ids,
         )
-        self.meter.set_channels([c.display() for c in
-                                 sorted((c for c in self.settings.audio.channels if c.role != "ignore"),
-                                        key=lambda c: c.index)])
+        self.meter.set_channels([c.display() for c in self.settings.audio.ordered_channels()])
         self.meter.reset_peaks()
         self.tbl.setRowCount(0)
         self._set_running(True)

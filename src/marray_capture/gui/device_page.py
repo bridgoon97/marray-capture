@@ -21,7 +21,7 @@ from ..audio.prompts import tone
 from ..audio.engine import AudioEngine
 from ..protocol.runner import RunnerHooks, calibrate_latency, channel_layout, measure_ambient
 from ..settings import CHANNEL_ROLES, AppSettings, ChannelMap
-from .widgets import IRView, LevelMeter, RunnerBridge, Worker
+from .widgets import IRView, LevelMeter, RoleToggle, RunnerBridge, Worker
 
 
 class DevicePage(QWidget):
@@ -100,10 +100,11 @@ class DevicePage(QWidget):
         left.addWidget(box_dev)
 
         # ---- 通道表
-        self.tbl = QTableWidget(0, 3)
-        self.tbl.setHorizontalHeaderLabels(["物理通道", "用途", "标签"])
-        self.tbl.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        box_ch = QGroupBox("输入通道映射")
+        self.tbl = QTableWidget(0, 5)
+        self.tbl.setHorizontalHeaderLabels(["录制", "声卡通道", "用途", "麦序号", "标签"])
+        self.tbl.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        self.tbl.verticalHeader().setVisible(False)
+        box_ch = QGroupBox("输入通道映射（勾选要录的通道，点用途切换麦克风/VPU/参考麦）")
         lay_ch = QVBoxLayout(box_ch)
 
         # 8 通道的卡逐行点太慢, 给一个批量分配
@@ -256,57 +257,95 @@ class DevicePage(QWidget):
 
     def _rebuild_channel_table(self, n_ch: int) -> None:
         existing = {c.index: c for c in self.settings.audio.channels}
-        self.tbl.blockSignals(True)
+        self._loading, was_loading = True, self._loading
         self.tbl.setRowCount(n_ch)
         for i in range(n_ch):
-            item = QTableWidgetItem(f"ch{i + 1}")
-            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-            self.tbl.setItem(i, 0, item)
-
-            cb = QComboBox()
-            cb.addItems(CHANNEL_ROLES)
             prev = existing.get(i)
-            default_role = prev.role if prev else ("mic" if i < 3 else "ignore")
-            cb.setCurrentText(default_role if default_role in CHANNEL_ROLES else "ignore")
-            cb.currentIndexChanged.connect(self._push_channels)
-            self.tbl.setCellWidget(i, 1, cb)
+            enabled = prev.enabled if prev else (i < 3)
+            role = prev.role if prev and prev.role in CHANNEL_ROLES else "mic"
+            order = prev.order if prev else i + 1
+            label = prev.label if prev else (f"mic{i + 1}" if i < 3 else "")
 
-            le = QLineEdit(prev.label if prev else ("" if i >= 3 else f"mic{i + 1}"))
+            # 录制: 勾了才会进录音和 IR
+            box = QWidget()
+            bl = QHBoxLayout(box)
+            bl.setContentsMargins(0, 0, 0, 0)
+            bl.setAlignment(Qt.AlignCenter)
+            ck = QCheckBox()
+            ck.setChecked(enabled)
+            ck.toggled.connect(self._push_channels)
+            bl.addWidget(ck)
+            self.tbl.setCellWidget(i, 0, box)
+
+            name = QTableWidgetItem(f"ch{i + 1}")
+            name.setFlags(name.flags() & ~Qt.ItemIsEditable)
+            self.tbl.setItem(i, 1, name)
+
+            # 用途: 点一下换一个 (麦克风 → VPU → 参考麦)
+            btn = RoleToggle(role)
+            btn.changed.connect(self._push_channels)
+            self.tbl.setCellWidget(i, 2, btn)
+
+            # 麦序号: 决定它是第几个麦克风, 必须与阵列几何的坐标行对应
+            sp = QSpinBox()
+            sp.setRange(1, max(1, n_ch))
+            sp.setValue(max(1, order))
+            sp.valueChanged.connect(self._push_channels)
+            self.tbl.setCellWidget(i, 3, sp)
+
+            le = QLineEdit(label)
             le.setPlaceholderText(f"ch{i + 1}")
             le.editingFinished.connect(self._push_channels)
-            self.tbl.setCellWidget(i, 2, le)
-        self.tbl.blockSignals(False)
+            self.tbl.setCellWidget(i, 4, le)
+
+        self.tbl.resizeColumnsToContents()
+        self.tbl.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        self._loading = was_loading
         self._push_channels()
+
+    def _row_widgets(self, i: int):
+        box = self.tbl.cellWidget(i, 0)
+        ck = box.findChild(QCheckBox) if box else None
+        return ck, self.tbl.cellWidget(i, 2), self.tbl.cellWidget(i, 3), self.tbl.cellWidget(i, 4)
 
     # ------------------------------------------------------------------ 同步
     def quick_assign(self) -> None:
-        """前 N 路设为麦克风, 可选再把下一路设为 VPU, 其余不用。"""
+        """把前 N 路勾成麦克风 (序号按行递增), 可选再把下一路设成 VPU。
+
+        只是个起点 —— 麦克风挂在哪几个物理通道上是任意的, 挪一下勾选和麦序号即可。
+        """
         n = self.sp_nmic.value()
-        for i in range(self.tbl.rowCount()):
-            cb = self.tbl.cellWidget(i, 1)
-            le = self.tbl.cellWidget(i, 2)
-            if cb is None:
-                continue
-            if i < n:
-                role, label = "mic", f"mic{i + 1}"
-            elif self.ck_vpu.isChecked() and i == n:
-                role, label = "vpu", "vpu"
-            else:
-                role, label = "ignore", ""
-            cb.blockSignals(True)
-            cb.setCurrentText(role)
-            cb.blockSignals(False)
-            if le is not None:
-                le.setText(label)
+        self._loading = True
+        try:
+            for i in range(self.tbl.rowCount()):
+                ck, btn, sp, le = self._row_widgets(i)
+                if ck is None:
+                    continue
+                if i < n:
+                    ck.setChecked(True)
+                    btn.set_role("mic")
+                    sp.setValue(i + 1)
+                    le.setText(f"mic{i + 1}")
+                elif self.ck_vpu.isChecked() and i == n:
+                    ck.setChecked(True)
+                    btn.set_role("vpu")
+                    le.setText("vpu")
+                else:
+                    ck.setChecked(False)
+                    le.setText("")
+        finally:
+            self._loading = False
         self._push_channels()
 
     def clear_assign(self) -> None:
-        for i in range(self.tbl.rowCount()):
-            cb = self.tbl.cellWidget(i, 1)
-            if cb is not None:
-                cb.blockSignals(True)
-                cb.setCurrentText("ignore")
-                cb.blockSignals(False)
+        self._loading = True
+        try:
+            for i in range(self.tbl.rowCount()):
+                ck, _, _, _ = self._row_widgets(i)
+                if ck is not None:
+                    ck.setChecked(False)
+        finally:
+            self._loading = False
         self._push_channels()
 
     def _push_channels(self) -> None:
@@ -314,25 +353,44 @@ class DevicePage(QWidget):
             return
         chans = []
         for i in range(self.tbl.rowCount()):
-            cb = self.tbl.cellWidget(i, 1)
-            le = self.tbl.cellWidget(i, 2)
-            if cb is None:
+            ck, btn, sp, le = self._row_widgets(i)
+            if ck is None or btn is None:
                 continue
-            chans.append(ChannelMap(index=i, role=cb.currentText(), label=le.text() if le else ""))
+            role = btn.role()
+            chans.append(ChannelMap(
+                index=i, role=role, label=le.text() if le else "",
+                enabled=ck.isChecked(), order=sp.value() if sp else i + 1,
+            ))
+            # 麦序号只对被勾上的麦克风有意义, 其余置灰免得误导
+            if sp is not None:
+                sp.setEnabled(ck.isChecked() and role == "mic")
+            if btn is not None:
+                btn.setEnabled(ck.isChecked())
+
         self.settings.audio.channels = chans
         _, labels, mic_cols = channel_layout(self.settings)
-        self.meter.set_channels(labels or ["(未选通道)"])
+        self.meter.set_channels(labels or ["(未勾选任何通道)"])
+        self._update_channel_summary(labels, mic_cols)
 
+    def _update_channel_summary(self, labels: list[str], mic_cols: list[int]) -> None:
         a = self.settings.audio
-        n_rec = a.n_record_channels()
-        roles = {r: len(a.role_indices(r)) for r in ("mic", "vpu", "ref", "loopback")}
-        bits = [f"{n} 路 {r}" for r, n in roles.items() if n]
-        self.lb_chsum.setText(
-            f"当前：{'、'.join(bits) or '未分配'}，实际录制前 {n_rec} 个物理通道后按此表切片。"
-            f"通道顺序即 IR 文件里的顺序。"
-            + (f"　⚠ 增强时阵列几何要配成 {len(mic_cols)} 个麦克风（后处理页）。"
-               if len(mic_cols) not in (0, 3) else "")
-        )
+        if not labels:
+            self.lb_chsum.setText("还没勾选任何通道。")
+            return
+        order = "、".join(f"{i + 1}:{lb}" for i, lb in enumerate(labels))
+        phys = "、".join(f"ch{i + 1}" for i in a.active_indices())
+        parts = [
+            f"IR 通道顺序：{order}",
+            f"对应声卡通道：{phys}（会向声卡请求 {a.n_record_channels()} 个通道再切片）",
+        ]
+        dup = a.duplicate_orders()
+        if dup:
+            parts.append(f"⚠ 麦序号 {dup} 重复了，同号的按声卡通道号先后排，建议改成互不相同。")
+        if mic_cols:
+            parts.append(
+                f"⚠ 后处理页的阵列几何必须配成 {len(mic_cols)} 个麦克风，"
+                f"且坐标第 k 行要对应上面的第 k 个麦克风。")
+        self.lb_chsum.setText("　".join(parts))
 
     def _push(self) -> None:
         if getattr(self, "_loading", False):
@@ -376,6 +434,9 @@ class DevicePage(QWidget):
             self.refresh_devices()
         finally:
             self._loading = False
+        # 两个都要补: 加载守卫把回填过程里的写回全挡掉了, 包括通道表建好后那次 ——
+        # 不补的话电平表和通道摘要会一直是空的。
+        self._push_channels()
         self._push()
 
     # ------------------------------------------------------------------ 动作

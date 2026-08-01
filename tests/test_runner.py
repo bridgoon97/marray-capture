@@ -79,8 +79,10 @@ def _settings(tmp_path) -> AppSettings:
     s.audio.input_device = 0
     s.audio.output_device = 1
     s.audio.channels = [
-        ChannelMap(0, "mic", "mic1"), ChannelMap(1, "mic", "mic2"),
-        ChannelMap(2, "mic", "mic3"), ChannelMap(3, "vpu", "vpu"),
+        ChannelMap(0, "mic", "mic1", enabled=True, order=1),
+        ChannelMap(1, "mic", "mic2", enabled=True, order=2),
+        ChannelMap(2, "mic", "mic3", enabled=True, order=3),
+        ChannelMap(3, "vpu", "vpu", enabled=True),
     ]
     s.sweep.f_start = 60.0
     s.sweep.f_end = 7800.0

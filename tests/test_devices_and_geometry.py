@@ -117,26 +117,63 @@ def test_duplex_reports_portaudio_error(monkeypatch):
 
 
 # ---------------------------------------------------------------- 通道映射
-def test_channel_map_handles_eight_channel_card():
-    """4 麦 + VPU 挂在 8 通道卡上, 且不从 0 号开始。"""
+def test_channel_map_handles_scrambled_eight_channel_card():
+    """4 麦 + VPU 挂在 8 通道卡上, 物理通道号打乱, 麦克风顺序由 order 决定。
+
+    这是真实接线的样子: mic1 在 ch6、mic2 在 ch3 …… 麦克风顺序必须跟着 order 走,
+    否则 IR 的通道顺序和阵列几何的坐标行对不上, 而且不会报错。
+    """
     cfg = AudioConfig(channels=[
-        ChannelMap(0, "ignore"), ChannelMap(1, "ignore"),
-        ChannelMap(2, "mic", "mic1"), ChannelMap(3, "mic", "mic2"),
-        ChannelMap(4, "mic", "mic3"), ChannelMap(5, "mic", "mic4"),
-        ChannelMap(6, "vpu", "vpu"), ChannelMap(7, "ignore"),
+        ChannelMap(0, "mic", "", enabled=False, order=9),   # 没勾, 不该出现
+        ChannelMap(1, "mic", "mic3", enabled=True, order=3),
+        ChannelMap(2, "mic", "mic2", enabled=True, order=2),
+        ChannelMap(3, "ref", "refmic", enabled=True),
+        ChannelMap(4, "mic", "mic4", enabled=True, order=4),
+        ChannelMap(5, "mic", "mic1", enabled=True, order=1),
+        ChannelMap(6, "vpu", "vpu", enabled=True),
+        ChannelMap(7, "mic", "", enabled=False, order=8),
     ])
-    assert cfg.mic_indices() == [2, 3, 4, 5]
-    assert cfg.active_indices() == [2, 3, 4, 5, 6]
-    assert cfg.n_record_channels() == 7       # 要录到第 7 个通道才能拿到 vpu
+    # 麦克风按 order 排, 不是按物理通道号
+    assert cfg.mic_indices() == [5, 2, 1, 4]
+    # 落盘顺序: 麦克风 → VPU → 参考麦
+    assert cfg.active_indices() == [5, 2, 1, 4, 6, 3]
+    assert cfg.n_record_channels() == 7        # 要录到 ch7 才能拿到 vpu
+    assert cfg.role_indices("vpu") == [6]
+    assert cfg.duplicate_orders() == []
 
     from marray_capture.protocol.runner import channel_layout
     from marray_capture.settings import AppSettings
     s = AppSettings()
     s.audio = cfg
     indices, labels, mic_cols = channel_layout(s)
-    assert indices == [2, 3, 4, 5, 6]
-    assert labels == ["mic1", "mic2", "mic3", "mic4", "vpu"]
-    assert mic_cols == [0, 1, 2, 3]           # 切片后的列号, 不是物理通道号
+    assert indices == [5, 2, 1, 4, 6, 3]
+    assert labels == ["mic1", "mic2", "mic3", "mic4", "vpu", "refmic"]
+    assert mic_cols == [0, 1, 2, 3]            # 麦克风恒在最前, 与几何坐标行对齐
+
+
+def test_duplicate_mic_order_is_reported():
+    cfg = AudioConfig(channels=[
+        ChannelMap(0, "mic", "a", enabled=True, order=1),
+        ChannelMap(1, "mic", "b", enabled=True, order=1),
+        ChannelMap(2, "mic", "c", enabled=True, order=2),
+    ])
+    assert cfg.duplicate_orders() == [1]
+    # 同号时按物理通道号先后排, 不会丢通道
+    assert cfg.mic_indices() == [0, 1, 2]
+
+
+def test_legacy_channel_config_migrates():
+    """旧配置用 role="ignore" 表示不录, 没有 enabled / order。"""
+    from marray_capture.settings import AppSettings
+
+    s = AppSettings.from_dict({"audio": {"channels": [
+        {"index": 0, "role": "mic", "label": "mic1"},
+        {"index": 1, "role": "ignore", "label": ""},
+        {"index": 2, "role": "vpu", "label": "vpu"},
+    ]}})
+    assert [c.enabled for c in s.audio.channels] == [True, False, True]
+    assert s.audio.mic_indices() == [0]
+    assert s.audio.role_indices("vpu") == [2]
 
 
 # ---------------------------------------------------------------- 阵列几何

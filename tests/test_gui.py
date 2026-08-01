@@ -49,6 +49,24 @@ def test_device_page_does_not_clobber_settings(qapp, settings):
         assert after[key] == before[key], f"{key} 被构造过程改掉了"
 
 
+def test_channel_summary_and_meter_populated_on_startup(qapp, settings, monkeypatch):
+    """加载守卫不能把通道摘要和电平表也一起挡掉。"""
+    from marray_capture.audio import devices as dev
+    from marray_capture.gui.device_page import DevicePage
+
+    fake = dev.DeviceInfo(index=0, name="4ch", hostapi="ASIO",
+                          max_input=4, max_output=4, default_samplerate=48000.0)
+    for name in ("list_devices", "input_devices", "output_devices"):
+        monkeypatch.setattr(dev, name, lambda f=fake: [f])
+    monkeypatch.setattr(dev, "describe", lambda i: fake if i == 0 else None)
+
+    page = DevicePage(settings, lambda: None)
+    qapp.processEvents()
+    assert settings.audio.channels, "启动后通道表应已写回配置"
+    assert "IR 通道顺序" in page.lb_chsum.text()
+    assert page.meter._bars, "电平表应已按通道建好"
+
+
 def test_quick_assign_builds_channel_map(qapp, settings, monkeypatch):
     """8 通道卡上一键分配 4 麦 + VPU。"""
     from marray_capture.audio import devices as dev
@@ -73,9 +91,55 @@ def test_quick_assign_builds_channel_map(qapp, settings, monkeypatch):
     assert a.mic_indices() == [0, 1, 2, 3]
     assert a.role_indices("vpu") == [4]
     assert a.n_record_channels() == 5
-    assert "4 路 mic" in page.lb_chsum.text()
+    assert "IR 通道顺序" in page.lb_chsum.text()
     # 输入输出同为 ASIO 设备 → 必须走全双工
     assert "全双工" in page.lb_mode.text()
+
+
+def test_channel_table_supports_scrambled_wiring(qapp, settings, monkeypatch):
+    """麦克风挂在任意物理通道上, 顺序由「麦序号」决定。"""
+    from marray_capture.audio import devices as dev
+    from marray_capture.gui.device_page import DevicePage
+
+    fake = dev.DeviceInfo(index=0, name="8ch", hostapi="ASIO",
+                          max_input=8, max_output=8, default_samplerate=48000.0)
+    for name in ("list_devices", "input_devices", "output_devices"):
+        monkeypatch.setattr(dev, name, lambda f=fake: [f])
+    monkeypatch.setattr(dev, "describe", lambda i: fake if i == 0 else None)
+
+    page = DevicePage(settings, lambda: None)
+    page.clear_assign()
+
+    # mic1→ch6, mic2→ch3, mic3→ch2, mic4→ch5, vpu→ch7 (界面上是 0-based 行号)
+    wiring = [(5, "mic", 1, "mic1"), (2, "mic", 2, "mic2"), (1, "mic", 3, "mic3"),
+              (4, "mic", 4, "mic4"), (6, "vpu", 1, "vpu")]
+    for row, role, order, label in wiring:
+        ck, btn, sp, le = page._row_widgets(row)
+        ck.setChecked(True)
+        btn.set_role(role)
+        sp.setValue(order)
+        le.setText(label)
+    page._push_channels()
+    qapp.processEvents()
+
+    a = settings.audio
+    assert a.mic_indices() == [5, 2, 1, 4]
+    assert a.active_indices() == [5, 2, 1, 4, 6]
+    assert a.n_record_channels() == 7
+    assert "mic1" in page.lb_chsum.text() and "ch6" in page.lb_chsum.text()
+
+
+def test_role_toggle_cycles(qapp):
+    from marray_capture.gui.widgets import RoleToggle
+
+    t = RoleToggle("mic")
+    seen = [t.role()]
+    for _ in range(3):
+        t.click()
+        seen.append(t.role())
+    assert seen == ["mic", "vpu", "ref", "mic"]
+    t.set_role("vpu")
+    assert t.role() == "vpu" and "VPU" in t.text()
 
 
 def test_post_page_custom_geometry(qapp, settings):

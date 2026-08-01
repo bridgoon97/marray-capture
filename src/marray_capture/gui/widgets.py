@@ -8,7 +8,8 @@ import pyqtgraph as pg
 from PySide6.QtCore import QObject, QThread, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QFrame, QGroupBox, QHBoxLayout, QLabel, QProgressBar, QVBoxLayout, QWidget,
+    QFrame, QGroupBox, QHBoxLayout, QLabel, QProgressBar, QPushButton,
+    QVBoxLayout, QWidget,
 )
 
 from . import theme
@@ -153,6 +154,48 @@ class IRView(QWidget):
             ok = freqs > 20
             self.freq_plot.plot(freqs[ok], spec[ok], pen=pen)
         self.time_plot.setYRange(-100, 5)
+
+
+class RoleToggle(QPushButton):
+    """通道用途的 toggle：点一下换一个（麦克风 → VPU → 参考麦）。
+
+    比下拉框快 —— 8 通道的卡逐路点下拉太慢，而实际上只有这三种用途。
+    """
+
+    changed = Signal(str)
+
+    def __init__(self, role: str = "mic", parent=None):
+        super().__init__(parent)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("点击切换：麦克风 / VPU / 参考麦")
+        self._role = role if role in theme.ROLE_ORDER else "mic"
+        self._render()
+        self.clicked.connect(self._cycle)
+
+    def role(self) -> str:
+        return self._role
+
+    def set_role(self, role: str) -> None:
+        if role in theme.ROLE_ORDER and role != self._role:
+            self._role = role
+            self._render()
+
+    def _cycle(self) -> None:
+        i = theme.ROLE_ORDER.index(self._role)
+        self._role = theme.ROLE_ORDER[(i + 1) % len(theme.ROLE_ORDER)]
+        self._render()
+        self.changed.emit(self._role)
+
+    def _render(self) -> None:
+        label, color, tint = theme.ROLE_STYLE[self._role]
+        self.setText(label)
+        self.setMinimumWidth(76)
+        self.setStyleSheet(
+            f"QPushButton {{ background: {tint}; color: {color};"
+            f" border: 1px solid {color}; border-radius: 4px;"
+            f" padding: 3px 10px; font-weight: 600; }}"
+            f"QPushButton:disabled {{ background: {theme.PAPER}; color: {theme.INK_FAINT};"
+            f" border-color: {theme.LINE}; }}")
 
 
 def group(title: str, inner: QWidget) -> QGroupBox:

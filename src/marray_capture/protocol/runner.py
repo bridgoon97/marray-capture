@@ -53,11 +53,12 @@ class RunnerHooks:
 
 
 def channel_layout(settings: AppSettings) -> tuple[list[int], list[str], list[int]]:
-    """返回 (物理通道索引, 标签, 麦克风在切片后的列号)。"""
-    active = sorted(
-        (c for c in settings.audio.channels if c.role != "ignore"),
-        key=lambda c: c.index,
-    )
+    """返回 (物理通道索引, 标签, 麦克风在切片后的列号)。
+
+    索引是**落盘顺序**而非物理顺序 —— 麦克风按用户指定的序号排在最前面, 所以
+    mic_cols 恒为 [0, 1, ... n-1], 与阵列几何的坐标行天然对齐。
+    """
+    active = settings.audio.ordered_channels()
     indices = [c.index for c in active]
     labels = [c.display() for c in active]
     mic_cols = [i for i, c in enumerate(active) if c.role == "mic"]

@@ -18,20 +18,45 @@ from typing import Any
 APP_DIR = Path.home() / ".marray-capture"
 SETTINGS_PATH = APP_DIR / "settings.json"
 
-# 通道用途。mic 会进入阵列 IR; vpu 单独存一路; loopback 用于延迟标定; ref 是测量麦。
-CHANNEL_ROLES = ["ignore", "mic", "vpu", "loopback", "ref"]
+# 通道用途。mic 进阵列 IR (有序); vpu 单独存一路; ref 是测量麦 (用于去音箱响应)。
+CHANNEL_ROLES = ["mic", "vpu", "ref"]
+ROLE_LABELS = {"mic": "麦克风", "vpu": "VPU", "ref": "参考麦"}
 
 
 @dataclass
 class ChannelMap:
-    """一路输入通道的角色定义。index 是声卡上的 0-based 物理通道号。"""
+    """一路输入通道。index 是声卡上的 0-based 物理通道号。
+
+    麦克风在声卡上的通道号是任意的, 顺序也不一定和阵列几何一致, 所以:
+    - ``enabled`` 决定这一路录不录 (界面上是勾选框)
+    - ``role`` 决定它是什么 (界面上是一个 toggle)
+    - ``order`` **只对麦克风有意义**: 它是第几个麦克风。IR 文件里的麦克风顺序按
+      order 排, 必须与后处理页阵列几何的坐标行一一对应 —— 错位不会报错,
+      只会让扩散尾的通道间相干性算错。
+    """
 
     index: int
-    role: str = "ignore"
+    role: str = "mic"
     label: str = ""
+    enabled: bool = False
+    order: int = 0
 
     def display(self) -> str:
         return self.label or f"ch{self.index + 1}"
+
+
+def _channel_from_dict(d: dict[str, Any]) -> ChannelMap:
+    """读旧配置。旧版用 role="ignore" 表示不录, 也没有 enabled / order 字段。"""
+    role = d.get("role", "mic")
+    enabled = d.get("enabled")
+    if enabled is None:
+        enabled = role in CHANNEL_ROLES
+    if role not in CHANNEL_ROLES:
+        role = "mic"
+    return ChannelMap(
+        index=int(d.get("index", 0)), role=role, label=d.get("label", ""),
+        enabled=bool(enabled), order=int(d.get("order", 0)),
+    )
 
 
 @dataclass
@@ -54,19 +79,41 @@ class AudioConfig:
     drift_ppm: float = 0.0
     drift_correction: bool = False
 
+    def ordered_channels(self) -> list[ChannelMap]:
+        """落盘顺序: 先按 order 排好的麦克风, 然后 VPU, 最后参考麦。
+
+        这样 IR 文件的第 k 列 (k < 麦克风数) 恒等于第 k 个麦克风, 与阵列几何的
+        第 k 行坐标对应 —— 不依赖麦克风挂在哪几个物理通道上。
+        """
+        on = [c for c in self.channels if c.enabled and c.role in CHANNEL_ROLES]
+        mics = sorted((c for c in on if c.role == "mic"), key=lambda c: (c.order, c.index))
+        rest = sorted((c for c in on if c.role != "mic"),
+                      key=lambda c: (CHANNEL_ROLES.index(c.role), c.index))
+        return mics + rest
+
     def mic_indices(self) -> list[int]:
-        return [c.index for c in self.channels if c.role == "mic"]
+        """麦克风的物理通道号, 按麦克风顺序 (不是物理顺序)。"""
+        return [c.index for c in self.ordered_channels() if c.role == "mic"]
 
     def role_indices(self, role: str) -> list[int]:
-        return [c.index for c in self.channels if c.role == role]
+        return [c.index for c in self.ordered_channels() if c.role == role]
 
     def active_indices(self) -> list[int]:
-        """所有需要落盘的通道 (按声卡物理顺序)。"""
-        return sorted(c.index for c in self.channels if c.role != "ignore")
+        """所有要落盘的物理通道号, **按落盘顺序**排列 (不是物理顺序)。"""
+        return [c.index for c in self.ordered_channels()]
 
     def n_record_channels(self) -> int:
+        """要向声卡请求几个通道 —— 必须录到用到的最大物理通道号为止。"""
         act = self.active_indices()
         return (max(act) + 1) if act else 0
+
+    def duplicate_orders(self) -> list[int]:
+        """返回被重复使用的麦克风序号, 用于界面提示。"""
+        seen: dict[int, int] = {}
+        for c in self.channels:
+            if c.enabled and c.role == "mic":
+                seen[c.order] = seen.get(c.order, 0) + 1
+        return sorted(k for k, v in seen.items() if v > 1)
 
 
 @dataclass
@@ -165,7 +212,7 @@ class AppSettings:
                 if hasattr(obj, f_name):
                     setattr(obj, f_name, val)
             if key == "audio":
-                obj.channels = [ChannelMap(**c) for c in sub.get("channels", [])]
+                obj.channels = [_channel_from_dict(c) for c in sub.get("channels", [])]
             setattr(s, key, obj)
         for f_name in ("session_root", "tts_enabled", "tts_backend", "tts_voice",
                        "auto_retry_on_fail"):
