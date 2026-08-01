@@ -6,14 +6,15 @@ from typing import Callable
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import QObject, QThread, Qt, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QGroupBox, QHBoxLayout, QLabel, QProgressBar, QVBoxLayout, QWidget,
+    QFrame, QGroupBox, QHBoxLayout, QLabel, QProgressBar, QVBoxLayout, QWidget,
 )
 
-pg.setConfigOptions(antialias=True, background="w", foreground="k")
+from . import theme
 
-VERDICT_COLOR = {"PASS": "#1a7f37", "WARN": "#bf8700", "FAIL": "#cf222e"}
+VERDICT_COLOR = {k: v[0] for k, v in theme.VERDICT.items()}
+VERDICT_GLYPH = {k: v[2] for k, v in theme.VERDICT.items()}
 
 
 class Worker(QThread):
@@ -63,19 +64,23 @@ class LevelMeter(QWidget):
             if item.widget():
                 item.widget().deleteLater()
         self._bars, self._labels, self._peak_hold = [], [], []
+        self._layout.setSpacing(3)
         for lb in labels:
             row = QWidget()
             h = QHBoxLayout(row)
             h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(8)
             name = QLabel(lb)
-            name.setMinimumWidth(70)
+            name.setMinimumWidth(64)
+            name.setObjectName("readout")
             bar = QProgressBar()
             bar.setRange(-72, 0)
             bar.setValue(-72)
             bar.setTextVisible(False)
-            bar.setFixedHeight(14)
-            val = QLabel("--")
-            val.setMinimumWidth(88)
+            bar.setFixedHeight(10)
+            val = QLabel("  --.-  /  --.-")
+            val.setObjectName("readout")
+            val.setMinimumWidth(112)
             val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             h.addWidget(name)
             h.addWidget(bar, 1)
@@ -93,10 +98,11 @@ class LevelMeter(QWidget):
             db = 20.0 * np.log10(max(float(rms[i]), 1e-12))
             self._peak_hold[i] = max(self._peak_hold[i] * 0.995 - 0.02, db)
             bar.setValue(int(np.clip(db, -72, 0)))
-            color = "#cf222e" if self._peak_hold[i] > -3 else (
-                "#bf8700" if self._peak_hold[i] > -12 else "#1a7f37")
+            # 峰值保持决定颜色: 逼近削顶报警, 太小也要看得出来
+            hold = self._peak_hold[i]
+            color = theme.BAD if hold > -3 else (theme.WARN if hold > -12 else theme.OK)
             bar.setStyleSheet(f"QProgressBar::chunk {{ background-color: {color}; }}")
-            self._labels[i].setText(f"{db:6.1f} / 峰 {self._peak_hold[i]:5.1f}")
+            self._labels[i].setText(f"{db:6.1f} / {hold:6.1f}")
 
     def reset_peaks(self) -> None:
         self._peak_hold = [-99.0] * len(self._peak_hold)
@@ -136,7 +142,7 @@ class IRView(QWidget):
         self.time_plot.addLegend(offset=(-10, 10))
         for c in range(ch):
             name = labels[c] if labels and c < len(labels) else f"ch{c + 1}"
-            pen = pg.mkPen(pg.intColor(c, hues=max(3, ch)), width=1)
+            pen = pg.mkPen(theme.PLOT_SERIES[c % len(theme.PLOT_SERIES)], width=1.2)
             env = 20.0 * np.log10(np.abs(x[:, c]) / peak + 1e-6)
             self.time_plot.plot(t, env, pen=pen, name=name)
 
@@ -157,13 +163,81 @@ def group(title: str, inner: QWidget) -> QGroupBox:
     return box
 
 
-def big_label(text: str = "") -> QLabel:
-    lb = QLabel(text)
-    f = QFont()
-    f.setPointSize(20)
-    f.setBold(True)
-    lb.setFont(f)
-    lb.setWordWrap(True)
-    lb.setAlignment(Qt.AlignCenter)
-    lb.setMinimumHeight(90)
-    return lb
+class InstructionCard(QWidget):
+    """采集页的主角: 一张大字指令卡, 左侧一道判定色条。
+
+    这是整套界面唯一用饱和色的地方。色条永远配一个字符 (✓ ! ✕), 不靠颜色单打独斗,
+    所以隔着三米、或者色觉障碍下都读得出来。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+
+        self.rail = QFrame()
+        self.rail.setFixedWidth(5)
+        self.rail.setStyleSheet(f"background: {theme.LINE_STRONG}; border: none;")
+        row.addWidget(self.rail)
+
+        body = QWidget()
+        body.setObjectName("card")
+        v = QVBoxLayout(body)
+        v.setContentsMargins(22, 16, 22, 18)
+        v.setSpacing(8)
+
+        self.eyebrow = QLabel("待开始")
+        self.eyebrow.setObjectName("eyebrow")
+
+        # 字号由 QSS 的 QLabel#display 给 —— QSS 优先级高于 setFont()
+        self.text = QLabel("按「开始采集」")
+        self.text.setObjectName("display")
+        self.text.setWordWrap(True)
+        self.text.setMinimumHeight(150)
+        self.text.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+        self.status = QLabel("就绪")
+        self.status.setObjectName("hint")
+
+        v.addWidget(self.eyebrow)
+        v.addWidget(self.text, 1)
+        v.addWidget(self.status)
+        row.addWidget(body, 1)
+
+        self._paint(theme.LINE_STRONG, theme.SURFACE)
+
+    def _paint(self, rail_color: str, bg: str) -> None:
+        self.rail.setStyleSheet(f"background: {rail_color}; border: none;")
+        self.setStyleSheet(
+            f"QWidget#card {{ background: {bg}; border: 1px solid {theme.LINE};"
+            f" border-left: none; border-radius: 0 6px 6px 0; }}")
+
+    def show_step(self, eyebrow: str, text: str) -> None:
+        self.eyebrow.setText(eyebrow)
+        self.text.setText(text)
+
+    def show_status(self, text: str) -> None:
+        self.status.setText(text)
+
+    def show_verdict(self, verdict: str) -> None:
+        color, tint, glyph = theme.VERDICT.get(
+            verdict, (theme.LINE_STRONG, theme.SURFACE, ""))
+        self._paint(color, tint)
+        if glyph:
+            self.status.setText(f"{glyph}  上一条 {verdict}")
+
+    def reset_verdict(self) -> None:
+        self._paint(theme.LINE_STRONG, theme.SURFACE)
+
+
+def verdict_cell(verdict: str):
+    """质检表里的判定单元格: 字符 + 判定色的浅底。"""
+    from PySide6.QtWidgets import QTableWidgetItem
+
+    color, tint, glyph = theme.VERDICT.get(verdict, ("", "", ""))
+    item = QTableWidgetItem(f"{glyph} {verdict}" if glyph else verdict)
+    if color:
+        item.setForeground(QColor(color))
+        item.setBackground(QColor(tint))
+    return item

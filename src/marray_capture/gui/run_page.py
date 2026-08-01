@@ -6,7 +6,6 @@
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QHBoxLayout, QHeaderView, QLabel, QMessageBox, QProgressBar, QPushButton,
     QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
@@ -17,7 +16,9 @@ from ..protocol.plan import Plan
 from ..protocol.runner import RunnerHooks, SessionRunner
 from ..settings import AppSettings
 from ..store import Session
-from .widgets import VERDICT_COLOR, IRView, LevelMeter, RunnerBridge, Worker, big_label
+from .widgets import (
+    InstructionCard, IRView, LevelMeter, RunnerBridge, Worker, verdict_cell,
+)
 
 
 class RunPage(QWidget):
@@ -35,52 +36,70 @@ class RunPage(QWidget):
     # ------------------------------------------------------------------ 布局
     def _build(self) -> None:
         root = QVBoxLayout(self)
+        root.setSpacing(12)
 
-        self.lb_session = QLabel("会话: -")
-        self.lb_session.setStyleSheet("color:#555;")
-        root.addWidget(self.lb_session)
-
-        self.lb_instruction = big_label("按「开始采集」")
-        self.lb_instruction.setStyleSheet(
-            "background:#f6f8fa; border:1px solid #d0d7de; border-radius:8px; padding:12px;")
-        root.addWidget(self.lb_instruction)
-
-        self.lb_state = QLabel("就绪")
-        self.lb_state.setAlignment(Qt.AlignCenter)
-        root.addWidget(self.lb_state)
-
+        # ---- 顶栏: 会话 + 进度。进度条只表示"走到第几步", 不抢注意力
+        top = QHBoxLayout()
+        self.lb_session = QLabel("会话 —")
+        self.lb_session.setObjectName("hint")
+        self.lb_progress = QLabel("0 / 0")
+        self.lb_progress.setObjectName("readout")
         self.pb = QProgressBar()
-        self.pb.setFormat("%v / %m")
-        root.addWidget(self.pb)
+        self.pb.setTextVisible(False)
+        self.pb.setFixedWidth(220)
+        top.addWidget(self.lb_session, 1)
+        top.addWidget(self.lb_progress)
+        top.addWidget(self.pb)
+        root.addLayout(top)
 
+        # ---- 主角: 指令卡。占满上部, 三米开外可读
+        self.card = InstructionCard()
+        root.addWidget(self.card)
+
+        # ---- 操作条: 开始是主按钮, 停止是危险色, 其余安静
         bar = QHBoxLayout()
+        bar.setSpacing(8)
         self.btn_start = QPushButton("开始采集")
+        self.btn_start.setObjectName("primary")
         self.btn_pause = QPushButton("暂停")
-        self.btn_redo = QPushButton("重录当前位置")
-        self.btn_skip = QPushButton("跳过当前位置")
+        self.btn_redo = QPushButton("重录这个位置")
+        self.btn_skip = QPushButton("跳过这个位置")
         self.btn_stop = QPushButton("停止")
+        self.btn_stop.setObjectName("danger")
         for b in (self.btn_start, self.btn_pause, self.btn_redo, self.btn_skip, self.btn_stop):
             b.setMinimumHeight(34)
             bar.addWidget(b)
+        bar.addStretch(1)
+        self.lb_counts = QLabel("✓ 0    ! 0    ✕ 0")
+        self.lb_counts.setObjectName("readout")
+        bar.addWidget(self.lb_counts)
         root.addLayout(bar)
 
+        # ---- 下部: 坐下来复核时才看的东西
         mid = QHBoxLayout()
+        mid.setSpacing(12)
+
         left = QVBoxLayout()
-        left.addWidget(QLabel("<b>输入电平</b>"))
+        left.setSpacing(6)
+        eyebrow = QLabel("输入电平  dBFS / 峰值")
+        eyebrow.setObjectName("eyebrow")
+        left.addWidget(eyebrow)
         self.meter = LevelMeter()
         left.addWidget(self.meter)
-        self.lb_counts = QLabel("PASS 0 / WARN 0 / FAIL 0")
-        left.addWidget(self.lb_counts)
         self.log = QTextEdit()
+        self.log.setObjectName("log")
         self.log.setReadOnly(True)
         left.addWidget(self.log, 1)
         mid.addLayout(left, 3)
 
         right = QVBoxLayout()
+        right.setSpacing(6)
         self.tbl = QTableWidget(0, 4)
-        self.tbl.setHorizontalHeaderLabels(["take_id", "结论", "一致性", "说明"])
+        self.tbl.setHorizontalHeaderLabels(["位置", "结论", "一致性", "说明"])
         self.tbl.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
-        self.tbl.setMaximumHeight(220)
+        self.tbl.setAlternatingRowColors(True)
+        self.tbl.verticalHeader().setVisible(False)
+        self.tbl.setMaximumHeight(210)
         right.addWidget(self.tbl)
         self.ir_view = IRView()
         right.addWidget(self.ir_view, 1)
@@ -96,7 +115,7 @@ class RunPage(QWidget):
 
     def _wire(self) -> None:
         self.bridge.level.connect(self.meter.update_levels)
-        self.bridge.state.connect(self.lb_state.setText)
+        self.bridge.state.connect(self.card.show_status)
         self.bridge.log.connect(self.log.append)
         self.bridge.step.connect(self._on_step)
         self.bridge.take.connect(self._on_take)
@@ -118,7 +137,7 @@ class RunPage(QWidget):
             QMessageBox.warning(self, "开始采集", "还没有把任何输入通道标为 mic, 去「设备」页配一下。")
             return
         session: Session = self.get_session()
-        self.lb_session.setText(f"会话: {session.dir}")
+        self.lb_session.setText(f"会话 {session.name}　·　{session.dir}")
         session.save_json("session.json", {
             "settings": self.settings.to_dict(),
             "plan_steps": len(plan.steps),
@@ -179,32 +198,32 @@ class RunPage(QWidget):
 
     # ------------------------------------------------------------------ 回调
     def _on_step(self, step, i: int, n: int) -> None:
-        prefix = "【调整】" if step.kind == "setup" else f"【{step.take_id}】"
-        self.lb_instruction.setText(f"{prefix}\n{step.instruction}")
+        if step.kind == "setup":
+            self.card.reset_verdict()
+            self.card.show_step("调整位置", step.instruction)
+        else:
+            self.card.show_step(step.take_id, step.instruction)
 
     def _on_progress(self, i: int, n: int) -> None:
         self.pb.setMaximum(n)
         self.pb.setValue(i)
+        self.lb_progress.setText(f"{i} / {n}")
 
     def _on_take(self, step, qc, record) -> None:
         r = self.tbl.rowCount()
         self.tbl.insertRow(r)
         ncc = qc.repeat_ncc
-        vals = [record.get("take_id", ""), qc.verdict,
-                "-" if ncc != ncc else f"{ncc:.3f}", qc.summary()]
-        for c, v in enumerate(vals):
-            item = QTableWidgetItem(v)
-            if c == 1:
-                item.setForeground(Qt.GlobalColor.black)
-                item.setBackground(_qcolor(VERDICT_COLOR.get(qc.verdict, "#ffffff")))
-            self.tbl.setItem(r, c, item)
+        self.tbl.setItem(r, 0, QTableWidgetItem(record.get("take_id", "")))
+        self.tbl.setItem(r, 1, verdict_cell(qc.verdict))
+        self.tbl.setItem(r, 2, QTableWidgetItem("  —  " if ncc != ncc else f"{ncc:.3f}"))
+        self.tbl.setItem(r, 3, QTableWidgetItem(qc.summary()))
         self.tbl.scrollToBottom()
+        self.card.show_verdict(qc.verdict)
 
-        session = self.get_session()
-        stats = session.stats()
+        stats = self.get_session().stats()
         self.lb_counts.setText(
-            f"PASS {stats['PASS']} / WARN {stats['WARN']} / FAIL {stats['FAIL']}  "
-            f"(共 {stats['total']})")
+            f"✓ {stats['PASS']}    ! {stats['WARN']}    ✕ {stats['FAIL']}")
+        session = self.get_session()
         ir_rel = record.get("ir_file")
         if ir_rel:
             try:
@@ -216,13 +235,6 @@ class RunPage(QWidget):
 
     def _on_finished(self, reason: str) -> None:
         self._set_running(False)
-        self.lb_state.setText(f"结束: {reason}")
-        self.lb_instruction.setText("本轮结束")
+        self.card.show_step("本轮结束", reason)
+        self.card.show_status("去「质检」页看分组统计，整组失败的当场补录")
         self.log.append(f"—— {reason} ——")
-
-
-def _qcolor(hex_str: str):
-    from PySide6.QtGui import QColor
-    c = QColor(hex_str)
-    c.setAlpha(60)
-    return c

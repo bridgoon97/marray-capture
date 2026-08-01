@@ -44,6 +44,8 @@ class AudioConfig:
     blocksize: int = 0              # 0 = 由驱动决定
     output_channels: int = 2
     output_gain_db: float = -6.0
+    # auto = 同设备走全双工单流, 异设备走分离双流。ASIO 必须全双工 (驱动单实例独占)
+    duplex_mode: str = "auto"       # auto | duplex | split
     # 输入通道映射; 录制时会录到 max(index)+1 路再按顺序切片
     channels: list[ChannelMap] = field(default_factory=list)
     # 输出→输入的往返延迟 (样本数)。由「延迟标定」测得; None 表示每次全局搜索

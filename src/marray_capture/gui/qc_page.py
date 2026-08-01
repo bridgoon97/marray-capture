@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 
 from ..settings import AppSettings
 from ..store import Session, list_sessions
-from .widgets import VERDICT_COLOR, IRView
+from .widgets import IRView, verdict_cell
 
 COLUMNS = ["take_id", "结论", "标签", "距离", "高度", "朝向", "方位",
            "一致性", "电平差 dB", "漂移 ppm", "弥散 ms", "最低 SNR", "最低 DDR", "说明"]
@@ -140,12 +140,7 @@ class QCPage(QWidget):
                 " / ".join(qc.get("reasons") or []),
             ]
             for c, v in enumerate(vals):
-                item = QTableWidgetItem(str(v))
-                if c == 1 and v in VERDICT_COLOR:
-                    from PySide6.QtGui import QColor
-                    col = QColor(VERDICT_COLOR[v])
-                    col.setAlpha(70)
-                    item.setBackground(col)
+                item = verdict_cell(str(v)) if c == 1 else QTableWidgetItem(str(v))
                 self.tbl.setItem(i, c, item)
         self.tbl.resizeColumnsToContents()
         self.tbl.horizontalHeader().setSectionResizeMode(len(COLUMNS) - 1, QHeaderView.Stretch)
@@ -166,12 +161,14 @@ class QCPage(QWidget):
             n_bad = sum(1 for v in vs if v == "FAIL")
             if n_bad and n_bad / len(vs) >= 0.3:
                 bad.append(f"{key[0]}/{key[1]}/{_s(key[2])}cm: {n_bad}/{len(vs)} FAIL")
+        from . import theme
         text = (f"共 {len(self.rows)} 个位置 —— "
-                f"<b style='color:#1a7f37'>PASS {counts['PASS']}</b> / "
-                f"<b style='color:#bf8700'>WARN {counts['WARN']}</b> / "
-                f"<b style='color:#cf222e'>FAIL {counts['FAIL']}</b>")
+                f"<b style='color:{theme.OK}'>✓ {counts['PASS']}</b>　"
+                f"<b style='color:{theme.WARN}'>! {counts['WARN']}</b>　"
+                f"<b style='color:{theme.BAD}'>✕ {counts['FAIL']}</b>")
         if bad:
-            text += "<br><b>批量失败的分组 (优先当场补录):</b> " + "；".join(bad)
+            text += (f"<br><b style='color:{theme.BAD}'>整组失败，优先当场补录：</b> "
+                     + "；".join(bad))
         self.lb_stats.setText(text)
 
     # ------------------------------------------------------------------ 交互

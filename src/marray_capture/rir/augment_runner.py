@@ -48,6 +48,32 @@ def default_config() -> dict[str, Any]:
     }
 
 
+def parse_coords(text: str) -> list[list[float]]:
+    """把「每行一个 x, y, z」的文本解析成坐标表 (单位米)。缺 z 补 0。
+
+    非 3 麦的阵列 (比如 4 麦 + VPU) 只能靠显式坐标 —— 扩散尾的通道间相干性
+    sinc(2πf·d/c) 完全由麦间距决定, 填错会让下游波束形成器得到过于乐观的结果。
+    """
+    pts: list[list[float]] = []
+    for lineno, raw in enumerate(text.splitlines(), 1):
+        line = raw.replace("，", ",").strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [p for p in line.replace("\t", " ").replace(",", " ").split() if p]
+        try:
+            vals = [float(p) for p in parts]
+        except ValueError as e:
+            raise ValueError(f"第 {lineno} 行解析失败: {raw.strip()!r}") from e
+        if len(vals) == 2:
+            vals.append(0.0)
+        if len(vals) != 3:
+            raise ValueError(f"第 {lineno} 行应有 2 或 3 个数, 实际 {len(vals)} 个")
+        pts.append(vals)
+    if len(pts) < 2:
+        raise ValueError("至少要两个麦克风坐标")
+    return pts
+
+
 def select_inputs(
     session_dir: str | Path,
     fs: int = 16000,
@@ -120,8 +146,11 @@ def run_augment(
             cols = mic_cols or list(range(min(n_geom, n_ch)))
             if len(cols) != n_geom:
                 raise ValueError(
-                    f"{path.name} 有 {len(cols)} 个麦克风通道, 但阵列几何配置了 {n_geom} 个。"
-                    " 请在增强参数里改阵列几何, 或检查通道映射。"
+                    f"{path.name} 有 {len(cols)} 个麦克风通道, 但阵列几何只配了 {n_geom} 个。\n"
+                    "在「阵列几何」里改成同样的麦克风数 —— 3 麦以外的布局选「自定义坐标」, "
+                    "按实际间距逐行填 x, y, z (单位米)。\n"
+                    "扩散尾的通道间相干性 sinc(2πf·d/c) 完全由这个几何决定, 填错会让"
+                    "下游波束形成器得到过于乐观的结果。"
                 )
             others = [i for i in range(n_ch) if i not in cols]
 

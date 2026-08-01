@@ -17,12 +17,12 @@ import numpy as np
 import soundfile as sf
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
-    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QProgressBar, QPushButton,
-    QSpinBox, QTextEdit, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QProgressBar,
+    QPushButton, QSpinBox, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from ..rir import speaker_eq
-from ..rir.augment_runner import default_config, run_augment, select_inputs
+from ..rir.augment_runner import default_config, parse_coords, run_augment, select_inputs
 from ..settings import AppSettings
 from ..store import Session, list_sessions
 from .widgets import IRView, RunnerBridge, Worker
@@ -118,8 +118,22 @@ class PostPage(QWidget):
         f2 = QFormLayout()
         self.sp_edge = QDoubleSpinBox(); self.sp_edge.setRange(0.001, 1.0); self.sp_edge.setDecimals(4)
         self.sp_edge.setValue(0.01); self.sp_edge.setSuffix(" m")
-        self.cb_geom = QComboBox(); self.cb_geom.addItems(["equilateral_triangle", "linear"])
-        self.sp_nmic = QSpinBox(); self.sp_nmic.setRange(2, 8); self.sp_nmic.setValue(3)
+        self.cb_geom = QComboBox()
+        for key, label in [
+            ("equilateral_triangle", "等边三角形 (3 麦)"),
+            ("linear", "线阵 (等间距)"),
+            ("coords", "自定义坐标 (任意麦克风数)"),
+        ]:
+            self.cb_geom.addItem(label, key)
+        self.sp_nmic = QSpinBox(); self.sp_nmic.setRange(2, 32); self.sp_nmic.setValue(3)
+        self.te_coords = QPlainTextEdit()
+        self.te_coords.setPlaceholderText(
+            "每行一个麦克风的 x, y, z，单位米。例如 4 麦 1cm 正方形：\n"
+            "0.005,  0.005, 0\n0.005, -0.005, 0\n-0.005, -0.005, 0\n-0.005,  0.005, 0")
+        self.te_coords.setMaximumHeight(110)
+        self.lb_geom = QLabel("-")
+        self.lb_geom.setWordWrap(True)
+        self.lb_geom.setObjectName("hint")
         self.sp_split = QDoubleSpinBox(); self.sp_split.setRange(5, 200); self.sp_split.setValue(50); self.sp_split.setSuffix(" ms")
         self.sp_cf = QDoubleSpinBox(); self.sp_cf.setRange(0, 50); self.sp_cf.setValue(5); self.sp_cf.setSuffix(" ms")
         w_t60, self.sp_t60a, self.sp_t60b = _range_row(0.2, 0.8, 0.05, " s")
@@ -135,6 +149,8 @@ class PostPage(QWidget):
         f2.addRow("阵列几何", self.cb_geom)
         f2.addRow("麦克风数", self.sp_nmic)
         f2.addRow("间距 / 边长", self.sp_edge)
+        f2.addRow("坐标", self.te_coords)
+        f2.addRow("", self.lb_geom)
         f2.addRow("早/晚分界", self.sp_split)
         f2.addRow("交叉淡化", self.sp_cf)
         f2.addRow("T60 区间 (log 采样)", w_t60)
@@ -177,6 +193,13 @@ class PostPage(QWidget):
         right.addWidget(self.view, 1)
         root.addLayout(right, 5)
 
+        self.cb_geom.currentIndexChanged.connect(self.refresh_geometry)
+        self.sp_nmic.valueChanged.connect(self.refresh_geometry)
+        self.sp_edge.valueChanged.connect(self.refresh_geometry)
+        self.te_coords.textChanged.connect(self.refresh_geometry)
+        self.cb_session.currentIndexChanged.connect(self.check_channels)
+        self.refresh_geometry()
+
     # ------------------------------------------------------------------ 数据
     def refresh(self) -> None:
         cur = self.cb_session.currentText()
@@ -191,23 +214,67 @@ class PostPage(QWidget):
         elif active:
             self.cb_session.setCurrentText(active.name)
 
+    def check_channels(self) -> None:
+        """拿会话里实际的麦克风通道数比对几何, 不一致就当场提示怎么改。"""
+        session = self._session()
+        if session is None:
+            return
+        rows = session.load_manifest()
+        counts = {len(r.get("mic_cols") or []) for r in rows if r.get("mic_cols")}
+        if not counts:
+            return
+        try:
+            from ..rir.rir_augment.geometry import build_array
+            n_geom = len(build_array(self._array_cfg()))
+        except Exception:
+            return
+        if counts != {n_geom}:
+            got = "/".join(str(c) for c in sorted(counts))
+            msg = (f"⚠ 这个会话的 IR 有 {got} 个麦克风通道，当前阵列几何是 {n_geom} 个。"
+                   f"把「阵列几何」改成「自定义坐标」并按实物填 {got} 行坐标。")
+            if msg != getattr(self, "_last_channel_warning", None):
+                self._last_channel_warning = msg
+                self.log.append(msg)
+
     def _session(self) -> Session | None:
         name = self.cb_session.currentText()
         if not name:
             return None
         return Session(self.settings.session_root, name, create=False)
 
+    def _array_cfg(self) -> dict:
+        kind = self.cb_geom.currentData()
+        if kind == "coords":
+            return {"coords": parse_coords(self.te_coords.toPlainText()), "generator": None}
+        if kind == "equilateral_triangle":
+            return {"coords": None,
+                    "generator": {"type": "equilateral_triangle", "edge": self.sp_edge.value()}}
+        return {"coords": None,
+                "generator": {"type": "linear", "num": self.sp_nmic.value(),
+                              "spacing": self.sp_edge.value()}}
+
+    def refresh_geometry(self) -> None:
+        """切换几何方式时更新可用控件与摘要。"""
+        kind = self.cb_geom.currentData()
+        self.te_coords.setEnabled(kind == "coords")
+        self.sp_nmic.setEnabled(kind == "linear")
+        self.sp_edge.setEnabled(kind in ("equilateral_triangle", "linear"))
+        try:
+            from ..rir.rir_augment.geometry import build_array, pairwise_distances
+            pts = build_array(self._array_cfg())
+            d = pairwise_distances(pts)
+            self.lb_geom.setText(
+                f"当前几何：{len(pts)} 个麦克风，最大间距 {d.max() * 100:.2f} cm，"
+                f"最小 {d[d > 0].min() * 100:.2f} cm。"
+                "扩散尾的通道间相干性完全由它决定，务必与实物一致。")
+        except Exception as e:
+            self.lb_geom.setText(f"⚠ 几何无效：{e}")
+
     def _cfg(self) -> dict:
         cfg = default_config()
         cfg["sample_rate"] = int(self.cb_fs.currentText())
         cfg["seed"] = self.sp_seed.value()
-        gen = {"type": self.cb_geom.currentText()}
-        if gen["type"] == "equilateral_triangle":
-            gen["edge"] = self.sp_edge.value()
-        else:
-            gen["num"] = self.sp_nmic.value()
-            gen["spacing"] = self.sp_edge.value()
-        cfg["array"] = {"coords": None, "generator": gen}
+        cfg["array"] = self._array_cfg()
         a = cfg["augment"]
         a["early_late_split_ms"] = self.sp_split.value()
         a["crossfade_ms"] = self.sp_cf.value()

@@ -117,8 +117,13 @@ def probe_settings(input_device: int | None, output_device: int | None,
     return problems
 
 
+def is_asio(device: int | None) -> bool:
+    info = describe(device)
+    return bool(info and "asio" in info.hostapi.lower())
+
+
 def validate(input_device: int | None, output_device: int | None, samplerate: int,
-             n_in: int, n_out: int) -> list[str]:
+             n_in: int, n_out: int, duplex: bool = False) -> list[str]:
     """只读描述信息的快速检查。以 "提示:" 开头的是提醒, 不阻塞流程。"""
     problems: list[str] = []
     if input_device is None:
@@ -128,13 +133,27 @@ def validate(input_device: int | None, output_device: int | None, samplerate: in
 
     din, dout = describe(input_device), describe(output_device)
     if din is not None and n_in > din.max_input:
-        problems.append(f"输入设备只有 {din.max_input} 个通道, 但通道映射用到了第 {n_in} 个")
+        problems.append(
+            f"输入设备「{din.name}」只有 {din.max_input} 个输入通道, 但通道映射用到了第 {n_in} 个。"
+            + (" ASIO4ALL 请在驱动面板里把需要的输入端口全部启用。" if is_asio(input_device)
+               else " Windows 上如果这里只有 2 个通道, 多半是选到了 MME 条目, 换成 WASAPI/ASIO 那条。")
+        )
     if dout is not None and n_out > dout.max_output:
         problems.append(f"输出设备只有 {dout.max_output} 个通道, 但配置要求 {n_out} 个")
     if samplerate <= 0:
         problems.append("采样率无效")
 
-    if input_device is not None and output_device is not None and input_device != output_device:
+    asio = is_asio(input_device) or is_asio(output_device)
+    same = input_device is not None and input_device == output_device
+
+    if asio and not same and input_device is not None and output_device is not None:
+        problems.append(
+            "ASIO 驱动通常独占设备, 输入和输出必须是同一个 ASIO 条目。"
+            "用 ASIO4ALL 的话, 声卡和音箱在 ASIO4ALL 面板里选, 这里只选那一个 ASIO 设备。"
+        )
+    if duplex or same:
+        problems.append("提示: 走全双工单流, 收发采样锁定 —— 没有时钟漂移, 延迟只有设备往返延迟。")
+    elif input_device is not None and output_device is not None:
         problems.append(
             "提示: 输入/输出是不同设备, 时钟不同源。软件会按扫频反卷积峰值对齐, "
             "并在每个位置估计漂移 (ppm); 漂移超阈值会在质检里报警。"

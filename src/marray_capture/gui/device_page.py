@@ -11,9 +11,9 @@ from __future__ import annotations
 import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout,
-    QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton, QSpinBox,
-    QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout, QGroupBox,
+    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton,
+    QSpinBox, QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from ..audio import devices as dev
@@ -30,11 +30,14 @@ class DevicePage(QWidget):
         self.settings = settings
         self.get_session = get_session
         self._worker: Worker | None = None
+        self._loading = False
         # 电平回调来自音频线程, 必须经信号跨回 GUI 线程
         self.bridge = RunnerBridge()
         self._build()
         self.bridge.level.connect(self.meter.update_levels)
-        self.refresh_devices()
+        # 必须走 pull(): 否则控件停在 Qt 的默认值上, 随后 _push() 会把这些默认值
+        # 写回 settings —— 输出通道数会变成 1、输出增益会变成 0 dB。
+        self.pull()
 
     @property
     def _hooks(self) -> RunnerHooks:
@@ -62,6 +65,13 @@ class DevicePage(QWidget):
         self.cb_in_lat.addItems(["low", "high"])
         self.cb_out_lat = QComboBox()
         self.cb_out_lat.addItems(["high", "low"])
+        self.cb_duplex = QComboBox()
+        for key, label in [
+            ("auto", "自动 (同设备走全双工)"),
+            ("duplex", "强制全双工单流 (ASIO 必选)"),
+            ("split", "强制分离双流 (跨设备)"),
+        ]:
+            self.cb_duplex.addItem(label, key)
 
         btn_refresh = QPushButton("刷新设备列表")
         btn_refresh.clicked.connect(self.rescan_devices)
@@ -74,10 +84,16 @@ class DevicePage(QWidget):
         form.addRow("块大小 (0=自动)", self.sp_block)
         form.addRow("输出通道数", self.sp_out_ch)
         form.addRow("输出增益", self.sp_gain)
+        form.addRow("收发模式", self.cb_duplex)
         form.addRow("输入延迟模式", self.cb_in_lat)
         form.addRow("输出延迟模式", self.cb_out_lat)
         form.addRow("", btn_refresh)
         form.addRow("", self.btn_probe)
+
+        self.lb_mode = QLabel()
+        self.lb_mode.setWordWrap(True)
+        self.lb_mode.setObjectName("hint")
+        form.addRow("", self.lb_mode)
 
         box_dev = QGroupBox("设备")
         box_dev.setLayout(form)
@@ -87,13 +103,34 @@ class DevicePage(QWidget):
         self.tbl = QTableWidget(0, 3)
         self.tbl.setHorizontalHeaderLabels(["物理通道", "用途", "标签"])
         self.tbl.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        box_ch = QGroupBox("输入通道映射 (mic 进阵列 / vpu 单独存 / ref 是测量麦 / loopback 是回环)")
+        box_ch = QGroupBox("输入通道映射")
         lay_ch = QVBoxLayout(box_ch)
+
+        # 8 通道的卡逐行点太慢, 给一个批量分配
+        quick = QHBoxLayout()
+        self.sp_nmic = QSpinBox()
+        self.sp_nmic.setRange(1, 32)
+        self.sp_nmic.setValue(3)
+        self.ck_vpu = QCheckBox("其后一路作 VPU")
+        self.ck_vpu.setChecked(True)
+        btn_apply = QPushButton("套用")
+        btn_clear = QPushButton("全部不用")
+        btn_apply.clicked.connect(self.quick_assign)
+        btn_clear.clicked.connect(self.clear_assign)
+        quick.addWidget(QLabel("前"))
+        quick.addWidget(self.sp_nmic)
+        quick.addWidget(QLabel("路作麦克风"))
+        quick.addWidget(self.ck_vpu)
+        quick.addWidget(btn_apply)
+        quick.addWidget(btn_clear)
+        quick.addStretch(1)
+        lay_ch.addLayout(quick)
+
         lay_ch.addWidget(self.tbl)
-        hint = QLabel("提示: 录制会录到所选最大通道号为止, 再按此表切片。顺序即 IR 文件里的通道顺序。")
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color:#666;")
-        lay_ch.addWidget(hint)
+        self.lb_chsum = QLabel()
+        self.lb_chsum.setWordWrap(True)
+        self.lb_chsum.setObjectName("hint")
+        lay_ch.addWidget(self.lb_chsum)
         left.addWidget(box_ch, 1)
 
         root.addLayout(left, 3)
@@ -135,6 +172,7 @@ class DevicePage(QWidget):
         self.sp_gain.valueChanged.connect(self._push)
         self.cb_in_lat.currentIndexChanged.connect(self._push)
         self.cb_out_lat.currentIndexChanged.connect(self._push)
+        self.cb_duplex.currentIndexChanged.connect(self._push)
 
     # ------------------------------------------------------------------ 设备
     def rescan_devices(self) -> None:
@@ -241,7 +279,39 @@ class DevicePage(QWidget):
         self._push_channels()
 
     # ------------------------------------------------------------------ 同步
+    def quick_assign(self) -> None:
+        """前 N 路设为麦克风, 可选再把下一路设为 VPU, 其余不用。"""
+        n = self.sp_nmic.value()
+        for i in range(self.tbl.rowCount()):
+            cb = self.tbl.cellWidget(i, 1)
+            le = self.tbl.cellWidget(i, 2)
+            if cb is None:
+                continue
+            if i < n:
+                role, label = "mic", f"mic{i + 1}"
+            elif self.ck_vpu.isChecked() and i == n:
+                role, label = "vpu", "vpu"
+            else:
+                role, label = "ignore", ""
+            cb.blockSignals(True)
+            cb.setCurrentText(role)
+            cb.blockSignals(False)
+            if le is not None:
+                le.setText(label)
+        self._push_channels()
+
+    def clear_assign(self) -> None:
+        for i in range(self.tbl.rowCount()):
+            cb = self.tbl.cellWidget(i, 1)
+            if cb is not None:
+                cb.blockSignals(True)
+                cb.setCurrentText("ignore")
+                cb.blockSignals(False)
+        self._push_channels()
+
     def _push_channels(self) -> None:
+        if getattr(self, "_loading", False):
+            return
         chans = []
         for i in range(self.tbl.rowCount()):
             cb = self.tbl.cellWidget(i, 1)
@@ -250,10 +320,23 @@ class DevicePage(QWidget):
                 continue
             chans.append(ChannelMap(index=i, role=cb.currentText(), label=le.text() if le else ""))
         self.settings.audio.channels = chans
-        _, labels, _ = channel_layout(self.settings)
+        _, labels, mic_cols = channel_layout(self.settings)
         self.meter.set_channels(labels or ["(未选通道)"])
 
+        a = self.settings.audio
+        n_rec = a.n_record_channels()
+        roles = {r: len(a.role_indices(r)) for r in ("mic", "vpu", "ref", "loopback")}
+        bits = [f"{n} 路 {r}" for r, n in roles.items() if n]
+        self.lb_chsum.setText(
+            f"当前：{'、'.join(bits) or '未分配'}，实际录制前 {n_rec} 个物理通道后按此表切片。"
+            f"通道顺序即 IR 文件里的顺序。"
+            + (f"　⚠ 增强时阵列几何要配成 {len(mic_cols)} 个麦克风（后处理页）。"
+               if len(mic_cols) not in (0, 3) else "")
+        )
+
     def _push(self) -> None:
+        if getattr(self, "_loading", False):
+            return
         a = self.settings.audio
         a.input_device = self.cb_in.currentData()
         a.output_device = self.cb_out.currentData()
@@ -264,16 +347,36 @@ class DevicePage(QWidget):
         a.output_gain_db = self.sp_gain.value()
         a.input_latency = self.cb_in_lat.currentText()
         a.output_latency = self.cb_out_lat.currentText()
+        a.duplex_mode = self.cb_duplex.currentData() or "auto"
+
+        duplex = AudioEngine(a).use_duplex()
+        asio = dev.is_asio(a.input_device) or dev.is_asio(a.output_device)
+        mode = "全双工单流（收发采样锁定，无时钟漂移）" if duplex else "分离双流（跨设备，会估计时钟漂移）"
+        extra = "　检测到 ASIO —— 输入输出必须是同一个 ASIO 条目。" if asio and not duplex else ""
+        self.lb_mode.setText(f"当前：{mode}。{extra}")
 
     def pull(self) -> None:
-        """从 settings 回填控件 (加载配置后调用)。"""
+        """从 settings 回填控件 (构造时和加载配置后调用)。
+
+        回填期间必须挡住 _push —— 每个 setValue 都会触发 valueChanged, 而那时
+        其余控件还停在 Qt 默认值上, _push 会把这些默认值写回 settings, 把还没
+        回填的字段冲掉 (输出增益 -6 dB 会变成 0 dB)。
+        """
         a = self.settings.audio
-        self.sp_block.setValue(a.blocksize)
-        self.sp_out_ch.setValue(a.output_channels)
-        self.sp_gain.setValue(a.output_gain_db)
-        self.cb_in_lat.setCurrentText(a.input_latency)
-        self.cb_out_lat.setCurrentText(a.output_latency)
-        self.refresh_devices()
+        self._loading = True
+        try:
+            self.sp_block.setValue(a.blocksize)
+            self.sp_out_ch.setValue(a.output_channels)
+            self.sp_gain.setValue(a.output_gain_db)
+            self.cb_in_lat.setCurrentText(a.input_latency)
+            self.cb_out_lat.setCurrentText(a.output_latency)
+            i = self.cb_duplex.findData(a.duplex_mode)
+            if i >= 0:
+                self.cb_duplex.setCurrentIndex(i)
+            self.refresh_devices()
+        finally:
+            self._loading = False
+        self._push()
 
     # ------------------------------------------------------------------ 动作
     def _busy(self, on: bool) -> None:
@@ -284,11 +387,11 @@ class DevicePage(QWidget):
         self.txt.append(text)
 
     def _check_ready(self) -> bool:
+        a = self.settings.audio
         problems = dev.validate(
-            self.settings.audio.input_device, self.settings.audio.output_device,
-            self.settings.audio.samplerate,
-            max(1, self.settings.audio.n_record_channels()),
-            self.settings.audio.output_channels,
+            a.input_device, a.output_device, a.samplerate,
+            max(1, a.n_record_channels()), a.output_channels,
+            duplex=AudioEngine(a).use_duplex(),
         )
         hard = [p for p in problems if not p.startswith("提示")]
         for p in problems:

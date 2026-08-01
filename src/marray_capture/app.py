@@ -72,11 +72,13 @@ def main() -> int:
 
     from PySide6.QtWidgets import QApplication
 
+    from .gui import theme
     from .gui.main_window import MainWindow
     from .settings import AppSettings
 
     app = QApplication(sys.argv)
     app.setApplicationName("marray-capture")
+    theme.apply(app)
     win = MainWindow(AppSettings.load())
     win.show()
     return app.exec()
