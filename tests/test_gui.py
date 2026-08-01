@@ -188,6 +188,79 @@ def test_display_font_size_survives_global_stylesheet(qapp):
     assert card.text.font().pointSize() >= theme.FS_LARGE
 
 
+def test_every_page_has_a_note_card(qapp, settings):
+    """五页都要有注意事项卡, 采集页默认折叠。"""
+    import tempfile
+
+    from marray_capture.gui.main_window import MainWindow
+
+    settings.session_root = tempfile.mkdtemp()
+    w = MainWindow(settings)
+    pages = {
+        "device": w.page_device, "plan": w.page_plan, "run": w.page_run,
+        "qc": w.page_qc, "post": w.page_post,
+    }
+    for name, page in pages.items():
+        card = getattr(page, "note_card", None)
+        assert card is not None, f"{name} 页没有注意事项卡"
+        assert card._notes, f"{name} 页的注意事项是空的"
+        assert "注意事项" in card.header.text()
+    assert pages["run"].note_card.collapsed, "采集页的卡片应默认折叠"
+    assert not pages["device"].note_card.collapsed
+
+
+def test_note_card_collapse_persists(qapp, settings):
+    from marray_capture.gui import notes
+
+    card = notes.build_note_card("qc", settings)
+    assert not card.collapsed
+    card.toggle()
+    assert card.collapsed and settings.notes_collapsed["qc"] is True
+    assert card.header.text().startswith("▸")
+    assert not card.body.isVisibleTo(card)
+
+    # 重新构造时应恢复折叠状态
+    again = notes.build_note_card("qc", settings)
+    assert again.collapsed
+
+
+def test_device_notes_follow_config(qapp, settings, monkeypatch):
+    """ASIO 的坑只在选了 ASIO 时提示, 蓝牙的坑只在跨设备时提示。"""
+    from marray_capture.audio import devices as dev
+    from marray_capture.gui import notes
+
+    asio = dev.DeviceInfo(0, "ASIO4ALL", "ASIO", 8, 8, 48000.0)
+    bt = dev.DeviceInfo(1, "BT speaker", "Core Audio", 0, 2, 48000.0)
+    monkeypatch.setattr(dev, "describe", lambda i: {0: asio, 1: bt}.get(i))
+
+    def texts(**kw):
+        settings.audio.input_device = kw.get("i")
+        settings.audio.output_device = kw.get("o")
+        return " ".join(n.text for n in notes.notes_for("device", settings))
+
+    same_asio = texts(i=0, o=0)
+    assert "单实例独占" in same_asio
+    assert "立体声" not in same_asio          # 同设备不该提蓝牙
+
+    cross = texts(i=0, o=1)
+    assert "立体声" in cross and "HFP" in cross
+
+    none_selected = texts()
+    assert "单实例独占" not in none_selected
+
+
+def test_notes_sorted_critical_first(settings):
+    from marray_capture.gui import notes
+
+    for page in notes.PAGES:
+        items = notes.notes_for(page, settings)
+        assert items, f"{page} 没有条目"
+        levels = [n.level for n in items]
+        rank = {"critical": 0, "warn": 1, "info": 2}
+        assert levels == sorted(levels, key=lambda x: rank[x]), f"{page} 没按轻重排序"
+        assert any(n.level == "critical" for n in items), f"{page} 应至少有一条必看"
+
+
 def test_main_window_builds_all_tabs(qapp, settings):
     from marray_capture.gui.main_window import MainWindow
 

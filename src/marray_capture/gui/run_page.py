@@ -16,6 +16,7 @@ from ..protocol.plan import Plan
 from ..protocol.runner import RunnerHooks, SessionRunner
 from ..settings import AppSettings
 from ..store import Session
+from . import notes
 from .widgets import (
     InstructionCard, IRView, LevelMeter, RunnerBridge, Worker, verdict_cell,
 )
@@ -51,6 +52,10 @@ class RunPage(QWidget):
         top.addWidget(self.lb_progress)
         top.addWidget(self.pb)
         root.addLayout(top)
+
+        # 默认折叠 —— 采集时不该有阅读材料, 需要时点开
+        self.note_card = notes.build_note_card("run", self.settings)
+        root.addWidget(self.note_card)
 
         # ---- 主角: 指令卡。占满上部, 三米开外可读
         self.card = InstructionCard()

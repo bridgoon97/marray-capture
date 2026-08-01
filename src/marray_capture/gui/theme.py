@@ -48,6 +48,17 @@ VERDICT = {
 # 绘图用的分类色: 与判定色拉开距离, 免得图上的曲线看着像在报警
 PLOT_SERIES = ["#1F4E9C", "#8A5FBF", "#0E7C86", "#C2683A", "#5A6570", "#A03E7A"]
 
+# 注意事项卡片。刻意低饱和 —— 招牌色留给采集页的判定色条, 这里不能抢。
+NOTE_TINT = "#F4F2ED"
+NOTE_LINE = "#E0DCD4"
+NOTE_CRITICAL, NOTE_WARN, NOTE_INFO = "critical", "warn", "info"
+NOTE_LABEL = {NOTE_CRITICAL: "必看", NOTE_WARN: "注意", NOTE_INFO: "提示"}
+NOTE_LEVEL = {
+    NOTE_CRITICAL: (BAD, BAD_TINT),
+    NOTE_WARN: (WARN, WARN_TINT),
+    NOTE_INFO: (INK_MUTED, "#EAE7E0"),
+}
+
 # 通道用途的 toggle: 循环顺序与配色。用途是分类不是状态, 所以不用判定色。
 ROLE_ORDER = ["mic", "vpu", "ref"]
 ROLE_STYLE = {

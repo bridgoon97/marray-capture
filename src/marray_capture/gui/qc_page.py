@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from ..settings import AppSettings
 from ..store import Session, list_sessions
+from . import notes
 from .widgets import IRView, verdict_cell
 
 COLUMNS = ["take_id", "结论", "标签", "距离", "高度", "朝向", "方位",
@@ -34,6 +35,8 @@ class QCPage(QWidget):
 
     def _build(self) -> None:
         root = QVBoxLayout(self)
+        self.note_card = notes.build_note_card("qc", self.settings)
+        root.addWidget(self.note_card)
 
         bar = QHBoxLayout()
         self.cb_session = QComboBox()

@@ -18,6 +18,7 @@ from ..audio.engine import AudioEngine
 from ..audio.prompts import PromptRenderer
 from ..protocol.plan import Plan, build_plan
 from ..settings import AppSettings
+from . import notes
 from .widgets import RunnerBridge, Worker
 
 
@@ -41,7 +42,11 @@ class PlanPage(QWidget):
 
     # ------------------------------------------------------------------ 布局
     def _build(self) -> None:
-        root = QHBoxLayout(self)
+        outer = QVBoxLayout(self)
+        self.note_card = notes.build_note_card("plan", self.settings)
+        outer.addWidget(self.note_card)
+        root = QHBoxLayout()
+        outer.addLayout(root, 1)
         left = QVBoxLayout()
 
         # ---- 协议

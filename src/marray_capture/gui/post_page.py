@@ -25,6 +25,7 @@ from ..rir import speaker_eq
 from ..rir.augment_runner import default_config, parse_coords, run_augment, select_inputs
 from ..settings import AppSettings
 from ..store import Session, list_sessions
+from . import notes
 from .widgets import IRView, RunnerBridge, Worker
 
 
@@ -60,7 +61,11 @@ class PostPage(QWidget):
 
     # ------------------------------------------------------------------ 布局
     def _build(self) -> None:
-        root = QHBoxLayout(self)
+        outer = QVBoxLayout(self)
+        self.note_card = notes.build_note_card("post", self.settings)
+        outer.addWidget(self.note_card)
+        root = QHBoxLayout()
+        outer.addLayout(root, 1)
         left = QVBoxLayout()
 
         # ---- 会话与输入筛选
@@ -269,6 +274,9 @@ class PostPage(QWidget):
                 "扩散尾的通道间相干性完全由它决定，务必与实物一致。")
         except Exception as e:
             self.lb_geom.setText(f"⚠ 几何无效：{e}")
+        card = getattr(self, "note_card", None)
+        if card is not None:      # 麦克风数变了, 自定义坐标那条要跟着出现/消失
+            card.set_notes(notes.notes_for("post", self.settings))
 
     def _cfg(self) -> dict:
         cfg = default_config()

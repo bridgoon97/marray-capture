@@ -189,6 +189,8 @@ class AppSettings:
     export: ExportConfig = field(default_factory=ExportConfig)
     qc: QCThresholds = field(default_factory=QCThresholds)
     session_root: str = str(Path.home() / "marray-sessions")
+    # 各页注意事项卡片的折叠状态 (页名 -> 是否折叠)
+    notes_collapsed: dict[str, bool] = field(default_factory=dict)
     tts_enabled: bool = True
     tts_backend: str = "auto"       # auto | piper | edge | sapi | say | none
     tts_voice: str = ""
@@ -214,8 +216,8 @@ class AppSettings:
             if key == "audio":
                 obj.channels = [_channel_from_dict(c) for c in sub.get("channels", [])]
             setattr(s, key, obj)
-        for f_name in ("session_root", "tts_enabled", "tts_backend", "tts_voice",
-                       "auto_retry_on_fail"):
+        for f_name in ("session_root", "notes_collapsed", "tts_enabled", "tts_backend",
+                       "tts_voice", "auto_retry_on_fail"):
             if f_name in d:
                 setattr(s, f_name, d[f_name])
         return s

@@ -21,6 +21,7 @@ from ..audio.prompts import tone
 from ..audio.engine import AudioEngine
 from ..protocol.runner import RunnerHooks, calibrate_latency, channel_layout, measure_ambient
 from ..settings import CHANNEL_ROLES, AppSettings, ChannelMap
+from . import notes
 from .widgets import IRView, LevelMeter, RoleToggle, RunnerBridge, Worker
 
 
@@ -45,7 +46,11 @@ class DevicePage(QWidget):
 
     # ------------------------------------------------------------------ 布局
     def _build(self) -> None:
-        root = QHBoxLayout(self)
+        outer = QVBoxLayout(self)
+        self.note_card = notes.build_note_card("device", self.settings)
+        outer.addWidget(self.note_card)
+        root = QHBoxLayout()
+        outer.addLayout(root, 1)
 
         # ---- 左: 设备与参数
         left = QVBoxLayout()
@@ -371,6 +376,13 @@ class DevicePage(QWidget):
         _, labels, mic_cols = channel_layout(self.settings)
         self.meter.set_channels(labels or ["(未勾选任何通道)"])
         self._update_channel_summary(labels, mic_cols)
+        self._refresh_notes()
+
+    def _refresh_notes(self) -> None:
+        """注意事项跟着当前配置走: 选了 ASIO 才提示 ASIO 的坑, 跨设备才提示蓝牙的坑。"""
+        card = getattr(self, "note_card", None)
+        if card is not None:
+            card.set_notes(notes.notes_for("device", self.settings))
 
     def _update_channel_summary(self, labels: list[str], mic_cols: list[int]) -> None:
         a = self.settings.audio
@@ -412,6 +424,7 @@ class DevicePage(QWidget):
         mode = "全双工单流（收发采样锁定，无时钟漂移）" if duplex else "分离双流（跨设备，会估计时钟漂移）"
         extra = "　检测到 ASIO —— 输入输出必须是同一个 ASIO 条目。" if asio and not duplex else ""
         self.lb_mode.setText(f"当前：{mode}。{extra}")
+        self._refresh_notes()
 
     def pull(self) -> None:
         """从 settings 回填控件 (构造时和加载配置后调用)。

@@ -156,6 +156,100 @@ class IRView(QWidget):
         self.time_plot.setYRange(-100, 5)
 
 
+class NoteCard(QWidget):
+    """每个环节的注意事项卡片。可折叠, 折叠状态记进配置。
+
+    刻意做得安静 —— 招牌色留给采集页的判定色条。这里只用一个分级小标签
+    （必看 / 注意 / 提示）区分轻重, 不抢视线。
+    """
+
+    toggled = Signal(bool)          # True = 已折叠
+
+    def __init__(self, page: str, collapsed: bool = False, parent=None):
+        super().__init__(parent)
+        self.page = page
+        self._collapsed = collapsed
+        self._notes: list = []
+
+        # 限宽 + 右侧留白: 卡片铺满窗宽的话一行会有一百多个字, 太长读不下去
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        inner = QWidget()
+        inner.setMaximumWidth(1080)
+        row.addWidget(inner)
+        row.addStretch(1)
+
+        v = QVBoxLayout(inner)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+
+        self.header = QPushButton()
+        self.header.setCursor(Qt.PointingHandCursor)
+        self.header.setStyleSheet(
+            f"QPushButton {{ background: {theme.NOTE_TINT}; color: {theme.INK_MUTED};"
+            f" border: 1px solid {theme.NOTE_LINE}; border-radius: 6px;"
+            f" padding: 5px 12px; text-align: left; font-size: {theme.FS_SMALL}pt;"
+            f" font-weight: 600; letter-spacing: 0.3px; }}"
+            f"QPushButton:hover {{ color: {theme.INK}; }}")
+        self.header.clicked.connect(self.toggle)
+        v.addWidget(self.header)
+
+        self.body = QLabel()
+        self.body.setWordWrap(True)
+        self.body.setTextFormat(Qt.RichText)
+        self.body.setStyleSheet(
+            f"QLabel {{ background: {theme.NOTE_TINT}; border: 1px solid {theme.NOTE_LINE};"
+            f" border-top: none; border-radius: 0 0 6px 6px; padding: 10px 12px 12px 12px; }}")
+        v.addWidget(self.body)
+        self._apply_state()
+
+    # ------------------------------------------------------------------ 内容
+    def set_notes(self, notes: list) -> None:
+        self._notes = list(notes)
+        rows = []
+        for n in self._notes:
+            color, tint = theme.NOTE_LEVEL.get(n.level, (theme.INK_MUTED, theme.PAPER))
+            chip = (f"<span style='background:{tint}; color:{color}; "
+                    f"padding:1px 5px; border-radius:3px; font-weight:600;'>"
+                    f"{theme.NOTE_LABEL.get(n.level, '')}</span>")
+            rows.append(
+                f"<tr><td valign='top' style='padding:0 8px 7px 0; white-space:nowrap;'>{chip}</td>"
+                f"<td valign='top' style='padding:0 0 7px 0; line-height:150%;'>{n.text}</td></tr>")
+        self.body.setText(
+            f"<table cellspacing='0' cellpadding='0'>{''.join(rows)}</table>"
+            if rows else "<i>这一步没有特别要注意的。</i>")
+        self._refresh_header()
+
+    def _refresh_header(self) -> None:
+        n_crit = sum(1 for n in self._notes if n.level == theme.NOTE_CRITICAL)
+        mark = "▸" if self._collapsed else "▾"
+        extra = f"　{n_crit} 条必看" if n_crit else ""
+        self.header.setText(f"{mark}  注意事项 · {len(self._notes)} 条{extra}")
+
+    # ------------------------------------------------------------------ 折叠
+    @property
+    def collapsed(self) -> bool:
+        return self._collapsed
+
+    def set_collapsed(self, value: bool) -> None:
+        if value != self._collapsed:
+            self._collapsed = value
+            self._apply_state()
+
+    def toggle(self) -> None:
+        self._collapsed = not self._collapsed
+        self._apply_state()
+        self.toggled.emit(self._collapsed)
+
+    def _apply_state(self) -> None:
+        self.body.setVisible(not self._collapsed)
+        radius = "6px" if self._collapsed else "6px 6px 0 0"
+        self.header.setStyleSheet(self.header.styleSheet().replace(
+            "border-radius: 6px;", f"border-radius: {radius};").replace(
+            "border-radius: 6px 6px 0 0;", f"border-radius: {radius};"))
+        self._refresh_header()
+
+
 class RoleToggle(QPushButton):
     """通道用途的 toggle：点一下换一个（麦克风 → VPU → 参考麦）。
 
