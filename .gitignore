@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# 采集产物默认落在 ~/marray-sessions, 但万一有人改到项目内
+sessions/
+*.wav
+*.flac
+!tests/**/*.wav

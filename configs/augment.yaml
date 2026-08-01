@@ -1,0 +1,35 @@
+# 混响随机增强的参考配置。
+#
+# GUI 的「后处理」页有同样的旋钮, 这份文件是给脚本化批处理留的参照,
+# 也方便和 ~/Projects/rir-augment 的 configs/default.yaml 对比 —— 二者语义一致,
+# 差别只在本工具会跳过非声学通道 (VPU), 并按质检结论筛输入。
+#
+# 参数写法: 标量 | [lo, hi] | {range: [lo, hi], sampling: log|linear}
+seed: 2026
+sample_rate: 16000
+speed_of_sound: 343.0
+
+array:
+  coords: null                     # 也可直接给 [[x,y,z], ...] 坐标, 单位米
+  generator:
+    type: equilateral_triangle     # equilateral_triangle | linear
+    edge: 0.01                     # 1 cm 等边三角形 (3 麦)
+
+augment:
+  early_late_split_ms: 50          # 保留实测早期段的边界 (直达 + 早期反射)
+  crossfade_ms: 5
+  tail_len_ms: [300, 1200]
+  t60: {range: [0.2, 0.8], sampling: log}
+  hf_damping: {range: [0.4, 0.9], sampling: linear}
+  drr: {range: [0.0, 15.0], sampling: linear}          # 越大越干/越近场
+  spectral_tilt_db_per_oct: {range: [-3.0, 1.0], sampling: linear}
+  subbands:
+    ref_freq: 1000.0
+    octave_centers: [125, 250, 500, 1000, 2000, 4000]
+  noise:
+    enable: true
+    snr_db: [40, 60]               # 通道间不相干的传感器噪声
+
+output:
+  num_per_rir: 4
+  manifest: manifest.jsonl
