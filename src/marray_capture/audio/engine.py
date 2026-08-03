@@ -197,12 +197,14 @@ class AudioEngine:
             if n > 0:
                 state["rec"][i: i + n] = indata[:n]
             pos["i"] = i + n
-            # 电平不在音频线程里算完就发, 只丢进队列, 由等待循环取
+            # 电平的算术不在音频线程里算完再发, 只丢进队列, 由等待循环取。
+            # 这里连 float64 转换 + 平方 + 归约都不做 —— 实时回调里只做一次
+            # float32 memcpy, 算术挪到 _drain_levels 的消费线程, 给回调留足余量
+            # (split 模式本来就是在消费线程算的, 这里对齐)。
             blk["n"] += 1
             if level_cb is not None and blk["n"] % 4 == 0:
                 try:
-                    level_q.put_nowait(
-                        np.sqrt((indata[:n].astype(np.float64) ** 2).mean(axis=0)))
+                    level_q.put_nowait(indata[:n].copy())
                 except queue.Full:
                     pass
             if self._abort.is_set():
@@ -252,11 +254,13 @@ class AudioEngine:
     def _drain_levels(q: "queue.Queue[np.ndarray]", level_cb: LevelCallback | None) -> None:
         while True:
             try:
-                rms = q.get_nowait()
+                blk = q.get_nowait()
             except queue.Empty:
                 return
-            if level_cb is not None:
-                level_cb(rms)
+            # 队列里存的是原始录音块 (物理通道序), 在这里算 per-channel RMS 再发。
+            # 算术留在消费线程 (非实时), 回调里只负责把块拷出来。
+            if level_cb is not None and len(blk):
+                level_cb(np.sqrt((blk.astype(np.float64) ** 2).mean(axis=0)))
 
     # ------------------------------------------------------------ 分离双流
     def _play_record_split(

@@ -4,6 +4,8 @@ from __future__ import annotations
 import os
 import tempfile
 
+import numpy as np
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
@@ -140,6 +142,40 @@ def test_role_toggle_cycles(qapp):
     assert seen == ["mic", "vpu", "ref", "mic"]
     t.set_role("vpu")
     assert t.role() == "vpu" and "VPU" in t.text()
+
+
+def test_level_meter_only_restyles_on_color_transition(qapp, monkeypatch):
+    """电平表高频更新时不能每帧 setStyleSheet。
+
+    setStyleSheet 触发整条 QSS 重新解析+重绘, 会把 GUI 线程的 GIL 占死,
+    卡住 PortAudio 音频回调 → 输出 underrun (扫频卡顿)。同档电平下只改 value,
+    只有跨档(OK/WARN/BAD)才设一次样式表。
+    """
+    from PySide6.QtWidgets import QProgressBar
+
+    from marray_capture.gui.widgets import LevelMeter
+
+    meter = LevelMeter()
+    meter.set_channels(["mic1", "mic2"])
+
+    calls = {"n": 0}
+    orig = QProgressBar.setStyleSheet
+
+    def spy(self, ss):
+        calls["n"] += 1
+        return orig(self, ss)
+
+    monkeypatch.setattr(QProgressBar, "setStyleSheet", spy)
+
+    # 首帧: 两个 bar 各从 "" 初始化到 OK 档 → 各一次
+    meter.update_levels(np.array([0.1, 0.1]))   # -20 dB, OK 档
+    assert calls["n"] == 2
+    # 同档再来一帧: 不该再设样式表
+    meter.update_levels(np.array([0.1, 0.1]))
+    assert calls["n"] == 2
+    # 跨档到 BAD (逼近削顶): 两个 bar 各再设一次
+    meter.update_levels(np.array([0.95, 0.95]))  # ≈ -0.4 dB, BAD 档
+    assert calls["n"] == 4
 
 
 def test_post_page_custom_geometry(qapp, settings):

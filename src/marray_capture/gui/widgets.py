@@ -58,13 +58,17 @@ class LevelMeter(QWidget):
         self._bars: list[QProgressBar] = []
         self._labels: list[QLabel] = []
         self._peak_hold: list[float] = []
+        # 每个 bar 当前 chunk 颜色。setStyleSheet 会触发整条 QSS 重新解析+重绘,
+        # 电平表在音频回调下高频更新, 每帧都设会把 GUI 线程的 GIL 占死,
+        # 卡住 PortAudio 回调 → 输出 underrun (扫频卡顿)。只在跨档时才设一次。
+        self._bar_color: list[str] = []
 
     def set_channels(self, labels: list[str]) -> None:
         while self._layout.count():
             item = self._layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        self._bars, self._labels, self._peak_hold = [], [], []
+        self._bars, self._labels, self._peak_hold, self._bar_color = [], [], [], []
         self._layout.setSpacing(3)
         for lb in labels:
             row = QWidget()
@@ -90,6 +94,7 @@ class LevelMeter(QWidget):
             self._bars.append(bar)
             self._labels.append(val)
             self._peak_hold.append(-99.0)
+            self._bar_color.append("")
 
     def update_levels(self, rms: np.ndarray) -> None:
         rms = np.atleast_1d(np.asarray(rms, dtype=float))
@@ -102,11 +107,15 @@ class LevelMeter(QWidget):
             # 峰值保持决定颜色: 逼近削顶报警, 太小也要看得出来
             hold = self._peak_hold[i]
             color = theme.BAD if hold > -3 else (theme.WARN if hold > -12 else theme.OK)
-            bar.setStyleSheet(f"QProgressBar::chunk {{ background-color: {color}; }}")
+            # 同档之下只改 value; 只有跨档才 setStyleSheet, 避免高频重绘卡住音频回调。
+            if self._bar_color[i] != color:
+                self._bar_color[i] = color
+                bar.setStyleSheet(f"QProgressBar::chunk {{ background-color: {color}; }}")
             self._labels[i].setText(f"{db:6.1f} / {hold:6.1f}")
 
     def reset_peaks(self) -> None:
         self._peak_hold = [-99.0] * len(self._peak_hold)
+        self._bar_color = [""] * len(self._bar_color)
 
 
 class IRView(QWidget):
