@@ -181,6 +181,29 @@ def test_level_meter_only_restyles_on_color_transition(qapp, monkeypatch):
     assert calls["n"] == 4
 
 
+def test_level_meter_peak_hold_does_not_climb_at_steady_level(qapp):
+    """稳态电平下峰值保持必须衰减回当前值, 不能随时间爬升。
+
+    之前 decay = hold*0.995 - 0.02 套在负 dB 上会渐近爬到 -4 dB ——
+    表现为右数随时间变大、同音量第二次扫频时颜色从绿变黄。改成按 dB/s
+    衰减后, 稳态 -25 dB 馈 200 帧, hold 应停在 -25 附近, 绝不爬进 WARN 区。
+    """
+    import time
+
+    from marray_capture.gui.widgets import LevelMeter
+
+    meter = LevelMeter()
+    meter.set_channels(["mic1"])
+    steady = 10.0 ** (-25.0 / 20.0)        # -25 dBFS 的线性幅度
+    holds = []
+    for _ in range(200):
+        meter._last_t = time.monotonic() - 0.05   # 绕过节流, dt≈0.05 s
+        meter.update_levels(np.array([steady]))
+        holds.append(meter._peak_hold[0])
+    assert holds[-1] < -12.0, f"峰值保持爬到 {holds[-1]:.1f} dB, 应停在 -25 附近"
+    assert holds[-1] <= holds[0] + 1.0, (holds[0], holds[-1])
+
+
 def test_post_page_custom_geometry(qapp, settings):
     from marray_capture.gui.post_page import PostPage
 

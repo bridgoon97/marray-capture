@@ -103,15 +103,20 @@ class LevelMeter(QWidget):
 
     def update_levels(self, rms: np.ndarray) -> None:
         now = time.monotonic()
-        if now - self._last_t < 0.04:          # 节流: 丢弃 40 ms 内的帧
+        dt = now - self._last_t
+        if dt < 0.04:                    # 节流: 丢弃 40 ms 内的帧
             return
         self._last_t = now
+        # 峰值保持按固定 dB/s 衰减回当前电平。注意必须用「减」而不是 ×0.995:
+        # hold 是负 dB, 乘 0.995 会让它更接近 0 (更大), 渐近爬到 -4 dB ——
+        # 表现为右数随时间不断变大, 同样音量第二次扫频时颜色从绿变黄。
+        decay = 12.0 * min(dt, 0.25)     # 12 dB/s, 长间隔封顶防一次掉太多
         rms = np.atleast_1d(np.asarray(rms, dtype=float))
         for i, bar in enumerate(self._bars):
             if i >= len(rms):
                 break
             db = 20.0 * np.log10(max(float(rms[i]), 1e-12))
-            self._peak_hold[i] = max(self._peak_hold[i] * 0.995 - 0.02, db)
+            self._peak_hold[i] = max(self._peak_hold[i] - decay, db)
             bar.setValue(int(np.clip(db, -72, 0)))
             # 峰值保持决定颜色: 逼近削顶报警, 太小也要看得出来
             hold = self._peak_hold[i]
