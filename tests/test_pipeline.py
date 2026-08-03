@@ -157,6 +157,43 @@ def test_qc_catches_movement_between_sweeps():
     assert qc.verdict == "FAIL"
 
 
+def test_subsample_alignment_recovers_ncc():
+    """两次扫频只差亚样本 (真实蓝牙漂移的典型量级) → 对齐后 NCC 该到 0.99+。
+
+    不做亚样本对齐时, 整样本对齐残留的 0.5 样本错位会在宽带早期段梳状衰减,
+    把 NCC 压到 0.8x, 看着像佩戴者动过 —— 这是这组改动要治的根。
+    """
+    sw = generate_ess(FS, 40, 20000, 2.0)
+    exc, starts = build_excitation(sw, 2, 1.0, 0.8, 1.0, 0.5)
+    ir = make_ir(seed=1)
+
+    def _shift(x, s):
+        n = x.shape[0]
+        X = np.fft.rfft(x, axis=0)
+        f = np.fft.rfftfreq(n, 1.0)[:, None]
+        return np.fft.irfft(X * np.exp(-2j * np.pi * f * s), n=n, axis=0)
+
+    ir_b = _shift(ir, 0.5)                       # 第二条用的 IR 晚 0.5 样本
+    lat = int(0.1 * FS)
+    rec = np.zeros((lat + len(exc) + 2000, 3))
+    for k, irk in enumerate((ir, ir_b)):
+        seg = np.zeros(len(exc))
+        seg[starts[k]: starts[k] + sw.n] = exc[starts[k]: starts[k] + sw.n]
+        part = simulate(seg, irk, latency=lat, snr_db=55.0, seed=3 + k)
+        rec[: len(part)] += part
+
+    deconv = deconvolve_take(rec, sw)
+    take = extract_take(deconv, sw, starts, 5.0, 200.0, 1.0, energy_channels=[0, 1, 2])
+    qc = evaluate_take(
+        rec=rec, deconv=deconv, ir_list=take.irs, ir_avg=take.ir_avg,
+        peaks=take.direct_indices, latency=take.latency_samples,
+        drift_ppm=take.drift_ppm, starts=starts, sweep_n=sw.n,
+        pre_samples=take.pre_samples, fs=FS,
+        labels=["mic1", "mic2", "mic3"], mic_cols=[0, 1, 2], thr=QCThresholds(),
+    )
+    assert qc.repeat_ncc > 0.99, f"亚样本对齐失效, NCC={qc.repeat_ncc:.3f}"
+
+
 def test_resample_to_16k_preserves_direct_peak():
     ir = make_ir(length=9600)
     ir16 = resample_ir(ir, FS, 16000)

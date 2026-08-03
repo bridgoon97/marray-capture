@@ -139,6 +139,7 @@ def evaluate_take(
     thr: QCThresholds,
     stream_warnings: str = "",
     early_ms: float = 50.0,
+    vpu_cols: list[int] | None = None,
 ) -> TakeQC:
     """对一个位置的采集做完整质检。
 
@@ -205,12 +206,17 @@ def evaluate_take(
         qc.repeat_ncc = float(a @ b / (na * nb)) if na > 0 and nb > 0 else float("nan")
         qc.repeat_level_diff_db = 20.0 * np.log10((na + 1e-20) / (nb + 1e-20))
 
-    _apply_thresholds(qc, thr, mic_cols)
+    _apply_thresholds(qc, thr, mic_cols, vpu_cols)
     return qc
 
 
-def _apply_thresholds(qc: TakeQC, thr: QCThresholds, mic_cols: list[int]) -> None:
+def _apply_thresholds(qc: TakeQC, thr: QCThresholds, mic_cols: list[int],
+                      vpu_cols: list[int] | None = None) -> None:
     """把指标翻译成 PASS / WARN / FAIL。差一点点的判 WARN, 差得多的判 FAIL。"""
+
+    # VPU 是非声学通道 (骨导/接触), 中低频本来就没信号, SNR/DDR 偏低是物理必然,
+    # 不该当失败判据。削顶和"几乎没信号"对所有通道照判 —— 那是录音层故障, 与用途无关。
+    vpu = set(vpu_cols or [])
 
     def check(value: float, limit: float, higher_is_better: bool, name: str, unit: str) -> None:
         if value != value:                       # nan
@@ -230,11 +236,12 @@ def _apply_thresholds(qc: TakeQC, thr: QCThresholds, mic_cols: list[int]) -> Non
 
     for i, ch in enumerate(qc.channels):
         if ch.peak_dbfs > thr.clip_dbfs:
-            qc.worsen(FAIL, f"{ch.label} 削顶 ({ch.peak_dbfs:.1f} dBFS)")
+            qc.worsen(FAIL, f"{ch.label} 削顶 ({ch.peak_dbfs:.1f} dBFS) — 降声卡硬件输入增益")
         elif ch.peak_dbfs < -50.0:
             qc.worsen(FAIL, f"{ch.label} 几乎没有信号 ({ch.peak_dbfs:.1f} dBFS), 疑似死麦或接线问题")
-        check(ch.rec_snr_db, thr.min_rec_snr_db, True, f"{ch.label} 录音 SNR", " dB")
-        check(ch.ir_ddr_db, thr.min_ir_ddr_db, True, f"{ch.label} IR 直达噪底比", " dB")
+        if i not in vpu:
+            check(ch.rec_snr_db, thr.min_rec_snr_db, True, f"{ch.label} 录音 SNR", " dB")
+            check(ch.ir_ddr_db, thr.min_ir_ddr_db, True, f"{ch.label} IR 直达噪底比", " dB")
         if i in mic_cols:
             check(ch.reliable_bw_hz, thr.min_reliable_bw_hz, True, f"{ch.label} 可靠带宽", " Hz")
 

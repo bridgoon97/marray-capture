@@ -1,6 +1,7 @@
 """通用控件与线程工具。"""
 from __future__ import annotations
 
+import time
 from typing import Callable
 
 import numpy as np
@@ -62,6 +63,10 @@ class LevelMeter(QWidget):
         # 电平表在音频回调下高频更新, 每帧都设会把 GUI 线程的 GIL 占死,
         # 卡住 PortAudio 回调 → 输出 underrun (扫频卡顿)。只在跨档时才设一次。
         self._bar_color: list[str] = []
+        # 分离双流模式下电平回调每个块都 emit (~上百 Hz), 不节流会撑死 GUI 线程
+        # (setText+setValue × 每通道, 拖不动窗口)。这里把刷新限到 ~25 Hz,
+        # 对电平表足够顺滑, 全双工模式本来就已经在回调里节流过, 不受影响。
+        self._last_t: float = 0.0
 
     def set_channels(self, labels: list[str]) -> None:
         while self._layout.count():
@@ -97,6 +102,10 @@ class LevelMeter(QWidget):
             self._bar_color.append("")
 
     def update_levels(self, rms: np.ndarray) -> None:
+        now = time.monotonic()
+        if now - self._last_t < 0.04:          # 节流: 丢弃 40 ms 内的帧
+            return
+        self._last_t = now
         rms = np.atleast_1d(np.asarray(rms, dtype=float))
         for i, bar in enumerate(self._bars):
             if i >= len(rms):

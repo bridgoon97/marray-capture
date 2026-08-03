@@ -45,7 +45,7 @@ class FakeEngine:
     def abort(self) -> None:
         pass
 
-    def play(self, mono) -> None:
+    def play(self, mono, pause_event=None) -> None:
         pass
 
     def play_record(self, play_mono, n_in_channels, extra_tail_s=0.0,

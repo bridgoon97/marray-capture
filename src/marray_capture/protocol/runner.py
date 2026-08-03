@@ -99,6 +99,9 @@ class SessionRunner:
         self.engine = AudioEngine(settings.audio)
         self.sweep = make_sweep(settings)
         self.ch_indices, self.ch_labels, self.mic_cols = channel_layout(settings)
+        # VPU 是非声学通道, SNR/DDR 偏低是物理必然, 质检不当判据 (见 _apply_thresholds)
+        self.vpu_cols = [i for i, c in enumerate(settings.audio.ordered_channels())
+                         if c.role == "vpu"]
 
         self._pause = threading.Event()
         self._stop = threading.Event()
@@ -187,7 +190,8 @@ class SessionRunner:
     def _run_setup(self, step: Step) -> None:
         self.hooks.call("on_state", step.instruction)
         lead = self._leadin(step, step.settle_s)
-        self.engine.play(lead)
+        # 引导语走可中止/可挂起的 play: 按停止立刻断, 按暂停原地停住
+        self.engine.play(lead, pause_event=self._pause)
 
     def _run_measure(self, step: Step, attempt: int = 1) -> None:
         st = self.settings
@@ -232,6 +236,7 @@ class SessionRunner:
             drift_ppm=take.drift_ppm, starts=starts, sweep_n=self.sweep.n,
             pre_samples=take.pre_samples, fs=fs, labels=self.ch_labels,
             mic_cols=self.mic_cols, thr=st.qc, stream_warnings=warnings,
+            vpu_cols=self.vpu_cols,
         )
         # 一致性不过就别平均, 亚样本错位会梳状衰减高频
         if qc.repeat_ncc == qc.repeat_ncc and qc.repeat_ncc < st.qc.min_repeat_ncc:
@@ -254,8 +259,15 @@ class SessionRunner:
         self.hooks.call("on_take", step, qc, record)
         self.hooks.call("on_log", f"[{qc.verdict}] {step.take_id} — {qc.summary()}")
 
+        # 一条采完了: 暂停在这里挂住, 先别播反馈音也别进下一步
+        self._wait_if_paused()
+        if self._stop.is_set():
+            return
         # 反馈音: 过了上行两声, 没过下行两声
-        self.engine.play(P.cue_fail(fs) if qc.verdict == FAIL else P.cue_done(fs))
+        self.engine.play(P.cue_fail(fs) if qc.verdict == FAIL else P.cue_done(fs),
+                         pause_event=self._pause)
+        if self._stop.is_set():
+            return
 
         if self._redo.is_set():
             self._redo.clear()

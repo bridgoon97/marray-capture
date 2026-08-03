@@ -168,12 +168,15 @@ def test_level_meter_only_restyles_on_color_transition(qapp, monkeypatch):
     monkeypatch.setattr(QProgressBar, "setStyleSheet", spy)
 
     # 首帧: 两个 bar 各从 "" 初始化到 OK 档 → 各一次
+    meter._last_t = 0.0
     meter.update_levels(np.array([0.1, 0.1]))   # -20 dB, OK 档
     assert calls["n"] == 2
-    # 同档再来一帧: 不该再设样式表
+    # 同档再来一帧: 不该再设样式表 (重置节流时钟, 隔离 setStyleSheet 行为)
+    meter._last_t = 0.0
     meter.update_levels(np.array([0.1, 0.1]))
     assert calls["n"] == 2
     # 跨档到 BAD (逼近削顶): 两个 bar 各再设一次
+    meter._last_t = 0.0
     meter.update_levels(np.array([0.95, 0.95]))  # ≈ -0.4 dB, BAD 档
     assert calls["n"] == 4
 

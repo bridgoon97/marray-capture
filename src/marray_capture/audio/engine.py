@@ -409,14 +409,63 @@ class AudioEngine:
         return np.concatenate(chunks, axis=0)[:need]
 
     # ------------------------------------------------------------------ 只播放
-    def play(self, mono: np.ndarray) -> None:
-        """播放提示音/语音, 阻塞直到播完。"""
+    def play(self, mono: np.ndarray, pause_event=None) -> None:
+        """播放提示音/语音, 阻塞直到播完。
+
+        和 ``sd.play`` 不同, 这里走自己的 OutputStream, 回调里查 ``_abort`` 和
+        ``pause_event`` —— ``sd.play`` + ``sd.wait`` 完全不检查中止, 采集页按
+        「停止」要等到整段引导语/倒计时播完才有反应 (setup 步的倒计时能到 20 秒);
+        「暂停」也只会卡在两条之间。这里让停止能立刻打断, 暂停能把整段播放在
+        原位挂住 (输出静音、位置不推进), 恢复后继续。
+        """
+        self._reset()
         buf = self._to_output(mono)
-        sd.play(buf, samplerate=self.cfg.samplerate, device=self.cfg.output_device, blocking=False)
+        if not len(buf):
+            return
+        fs = self.cfg.samplerate
+        pos = {"i": 0}
+        finished = threading.Event()
+
+        def out_cb(outdata, frames, time_info, status):  # noqa: ANN001
+            if self._abort.is_set():
+                finished.set()
+                raise sd.CallbackAbort
+            # 暂停: 输出静音, 位置不推进, 流保持开着, 恢复后从原位继续
+            if pause_event is not None and pause_event.is_set():
+                outdata[:] = 0.0
+                return
+            i = pos["i"]
+            n = min(frames, len(buf) - i)
+            outdata[:n] = buf[i: i + n]
+            if n < frames:
+                outdata[n:] = 0.0
+            pos["i"] = i + n
+            if pos["i"] >= len(buf):
+                finished.set()
+                raise sd.CallbackStop
+
+        blocksize = int(self.cfg.blocksize or 0)
         try:
-            sd.wait()
-        except Exception:
-            pass
+            stream = sd.OutputStream(
+                device=self.cfg.output_device,
+                channels=max(1, int(self.cfg.output_channels)),
+                samplerate=fs, dtype="float32", blocksize=blocksize,
+                latency=self.cfg.output_latency, callback=out_cb,
+            )
+            with stream:
+                # 缓冲区时长 + 5s 兜底防驱动异常死等; 暂停时把 deadline 往后推,
+                # 不然停在原地几秒就超时提前结束了
+                deadline = time.monotonic() + len(buf) / fs + 5.0
+                while not finished.wait(0.05):
+                    if self._abort.is_set():
+                        break
+                    if pause_event is not None and pause_event.is_set():
+                        deadline = time.monotonic() + len(buf) / fs + 5.0
+                        continue
+                    if time.monotonic() > deadline:
+                        break
+        except sd.PortAudioError as e:
+            raise EngineError(f"打开输出流失败: {e}") from e
 
 
 def map_levels(rms: np.ndarray, indices: list[int]) -> np.ndarray:

@@ -124,6 +124,18 @@ def extract_take(
     length = int(round(ir_len_ms * 1e-3 * fs))
     irs = [_cut(deconv, p, pre, length) for p in peaks]
 
+    # 多次扫频各自按整样本直达峰对齐, 残留的亚样本错位直接平均会梳状衰减高频,
+    # 静止位置两次扫频的 NCC 也会被压到 0.8x 看着像动了。这里把第 2 条起按互相关
+    # 峰做亚样本平移对到第 1 条上 —— 用 FFT 相位旋转 (全通, 不动频谱幅度,
+    # 绝对电平关系是后面 ILD/DDR 的依据, 不能被动)。对齐后再平均 / 再算一致性,
+    # NCC 能到 0.99+。对齐跟 average 开不开解耦: 一致性指标无论是否平均都该公平。
+    if len(irs) > 1:
+        chs = energy_channels if energy_channels is not None else list(range(irs[0].shape[1]))
+        for k in range(1, len(irs)):
+            lag = _estimate_lag(irs[0], irs[k], chs)
+            if abs(lag) > 1e-6:
+                irs[k] = _fractional_shift(irs[k], lag)
+
     ir_avg = irs[0]
     n_avg = 1
     if average and len(irs) > 1:
@@ -135,6 +147,57 @@ def extract_take(
         irs=irs, ir_avg=ir_avg, direct_indices=peaks, latency_samples=latency,
         drift_ppm=drift, pre_samples=pre, fs=fs, n_averaged=n_avg,
     )
+
+
+def _estimate_lag(a: np.ndarray, b: np.ndarray, chs: list[int]) -> float:
+    """返回把 b 对齐到 a 所需的样本平移 (可亚样本)。用指定通道算归一化互相关。
+
+    直达峰已经在 ``_cut`` 里按整样本对齐过, 残差 <1 样本, ±3 样本窗足够;
+    再用抛物线插值得亚样本峰。窗开大了会把无关反射也对上, 反而虚高。
+    """
+    aa = a[:, chs] if chs else a
+    bb = b[:, chs] if chs else b
+    n = min(len(aa), len(bb))
+    if n < 8:
+        return 0.0
+    aa = aa[:n].astype(float)
+    bb = bb[:n].astype(float)
+    na, nb = float(np.linalg.norm(aa)), float(np.linalg.norm(bb))
+    if na <= 0.0 or nb <= 0.0:
+        return 0.0
+    W = 3
+    cors: dict[int, float] = {}
+    for lag in range(-W, W + 1):
+        if lag >= 0:
+            x, y = aa[lag:], bb[:n - lag]
+        else:
+            x, y = aa[:n + lag], bb[-lag:]
+        if len(x) > 1:
+            nx, ny = float(np.linalg.norm(x)), float(np.linalg.norm(y))
+            if nx > 0.0 and ny > 0.0:
+                cors[lag] = float((x * y).sum() / (nx * ny))
+    if not cors:
+        return 0.0
+    best = max(cors, key=cors.get)
+    if -W < best < W:
+        ym1, y0, yp1 = cors[best - 1], cors[best], cors[best + 1]
+        denom = ym1 - 2.0 * y0 + yp1
+        if denom != 0.0:
+            delta = 0.5 * (ym1 - yp1) / denom
+            if abs(delta) <= 1.0:
+                return float(best) + float(delta)
+    return float(best)
+
+
+def _fractional_shift(x: np.ndarray, shift: float) -> np.ndarray:
+    """按 shift 个样本平移 (可亚样本), 沿 axis=0。FFT 相位旋转, 全通 ——
+    不改频谱幅度, 所以绝对电平关系 (ILD/DRR 的依据) 不会被动, 这点比样条插值好。"""
+    if abs(shift) < 1e-9:
+        return np.asarray(x, dtype=float)
+    n = x.shape[0]
+    X = np.fft.rfft(np.asarray(x, dtype=float), axis=0)
+    f = np.fft.rfftfreq(n, 1.0)[:, None]
+    return np.fft.irfft(X * np.exp(-2j * np.pi * f * shift), n=n, axis=0)
 
 
 # ---------------------------------------------------------------------- 重采样

@@ -177,7 +177,7 @@ class QCThresholds:
     clip_dbfs: float = -0.5         # 峰值超过判削顶
     min_rec_snr_db: float = 25.0
     min_ir_ddr_db: float = 30.0     # 直达峰 / IR 远端噪声
-    min_repeat_ncc: float = 0.95    # 两次扫频早期段的归一化互相关
+    min_repeat_ncc: float = 0.90    # 两次扫频早期段的归一化互相关 (亚样本对齐后)
     max_repeat_level_diff_db: float = 1.0
     max_drift_ppm: float = 200.0
     min_reliable_bw_hz: float = 6000.0
