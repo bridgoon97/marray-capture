@@ -128,6 +128,32 @@ def test_qc_passes_on_clean_take_and_fails_on_noisy():
             assert qc.verdict == "FAIL", qc.summary()
 
 
+def test_qc_ignores_startup_transient():
+    """开流瞬态 (录音最前面几 ms 一个近 0 dBFS 脉冲) 不该判削顶。
+
+    真实声卡开输入流时, 第一个缓冲区常带一个接近满量程的 click, 落在 guard
+    静音区。之前 peak_dbfs 对整段 rec 取 max, 会被它误判削顶; 现在峰值取在
+    扫频信号窗, 且噪声窗跳过前 10 ms, 应判 PASS。
+    """
+    sw = generate_ess(FS, 40, 20000, 2.0)
+    exc, starts = build_excitation(sw, 2, 1.0, 0.8, 1.0, 0.5)
+    ir = make_ir()
+    rec = simulate(exc, ir, latency=int(0.1 * FS), snr_db=50.0, seed=7)
+    # 注入开流瞬态: 每通道最前面 5 ms 一个 0 dBFS 脉冲 (远高于扫频的 -12 dBFS)
+    rec[:int(0.005 * FS), :] = 1.0
+    deconv = deconvolve_take(rec, sw)
+    take = extract_take(deconv, sw, starts, 5.0, 200.0, 1.0, energy_channels=[0, 1, 2])
+    qc = evaluate_take(
+        rec=rec, deconv=deconv, ir_list=take.irs, ir_avg=take.ir_avg,
+        peaks=take.direct_indices, latency=take.latency_samples,
+        drift_ppm=take.drift_ppm, starts=starts, sweep_n=sw.n,
+        pre_samples=take.pre_samples, fs=FS,
+        labels=["mic1", "mic2", "mic3"], mic_cols=[0, 1, 2], thr=QCThresholds(),
+    )
+    assert "削顶" not in qc.summary(), qc.summary()
+    assert qc.verdict == "PASS", qc.summary()
+
+
 def test_qc_catches_movement_between_sweeps():
     """两次扫频之间佩戴者动了 → 一致性指标必须掉下来。"""
     sw = generate_ess(FS, 40, 20000, 2.0)

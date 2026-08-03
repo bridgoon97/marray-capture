@@ -159,8 +159,14 @@ def evaluate_take(
     noise_hi = max(noise_lo + 1, peaks[0] - int(0.01 * fs))
     dec_noise = deconv[noise_lo:noise_hi]
 
-    rec_noise = rec[max(0, d0 - int(1.0 * fs)): max(1, d0 - int(0.05 * fs))]
-    rec_sig = rec[max(0, d0): min(len(rec), d0 + sweep_n)]
+    # 录音最前面的一段是声卡开流瞬态 (输入缓冲区初始化/ADC 启动), 每通道都会
+    # 有一个接近 0 dBFS 的窄脉冲, 落在 guard 静音区里。它不是信号, 却会同时
+    # 污染两个指标: ① peak_dbfs 对整段取 max → 误判削顶; ② rec_noise 从 t=0
+    # 起算时把它当噪底 → SNR 偏低。guard 本就是静音, 把这前若干 ms 从录音层
+    # 指标里整体剔掉。脉冲实测约 5 ms, 取 10 ms 留余量。
+    startup = int(0.01 * fs)
+    rec_noise = rec[max(startup, d0 - int(1.0 * fs)): max(startup + 1, d0 - int(0.05 * fs))]
+    rec_sig = rec[max(startup, d0): min(len(rec), d0 + sweep_n)]
 
     early_n = int(round(early_ms * 1e-3 * fs))
     ref_rms = None
@@ -169,7 +175,11 @@ def evaluate_take(
         label = labels[c] if c < len(labels) else f"ch{c + 1}"
         ch = ChannelQC(label=label)
 
-        peak = float(np.max(np.abs(rec[:, c]))) if len(rec) else 0.0
+        # 峰值取在扫频信号窗, 不取整段 rec —— 开流瞬态在 guard 区, 信号窗在
+        # d0 之后, 天然避开它; 也避开尾部的静音/漂移段。这样接近 0 dBFS 的
+        # 启动脉冲不再误触发削顶判据。
+        sig = rec_sig if len(rec_sig) else rec
+        peak = float(np.max(np.abs(sig[:, c]))) if len(sig) else 0.0
         ch.peak_dbfs = 20.0 * np.log10(max(peak, 1e-12))
 
         if len(rec_noise) > 16 and len(rec_sig) > 16:

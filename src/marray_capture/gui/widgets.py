@@ -9,8 +9,8 @@ import pyqtgraph as pg
 from PySide6.QtCore import QObject, QThread, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QDialog, QFrame, QGroupBox, QHBoxLayout, QLabel, QProgressBar, QPushButton,
-    QScrollArea, QVBoxLayout, QWidget,
+    QDialog, QFrame, QGraphicsItem, QGroupBox, QHBoxLayout, QLabel, QProgressBar,
+    QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from . import theme
@@ -143,17 +143,19 @@ class IRView(QWidget):
         self.freq_plot.setLabel("left", "幅度", units="dB")
         self.freq_plot.setLogMode(x=True, y=False)
         self.freq_plot.showGrid(x=True, y=True, alpha=0.3)
-        # IR 默认 1 s 长 (48 kHz = 4.8 万点/通道), 不降采样的话平移/缩放每帧
-        # 都重绘全部点 → 交互卡顿。clipToView 让视口外的点不参与重绘,
-        # peak 降采样保住尖峰不被均值抹平 (直达峰是窄脉冲, mean 会矮掉)。
-        # 进一步把鼠标平移/缩放/右键菜单全关掉 —— 这套界面是三米外看的
-        # 采集仪器, 不需要鼠标在图上拖拽探查; 关掉既杜绝交互卡顿, 也免得
-        # 误操作把视图拖飞。需要细看时去会话目录拿原始 IR 文件。
+        # 鼠标平移/缩放/右键菜单全关 —— 这套界面是三米外看的采集仪器,
+        # 不需要在图上拖拽探查; 关掉既杜绝交互卡顿, 也免得误操作把视图拖飞。
+        # 需要细看时去会话目录拿原始 IR 文件。
+        # (降采样/clipToView 不在这里设: PlotItem 级的 setDownsampling 只作用于
+        # 已存在的曲线, 而 __init__ 时还没曲线; 必须在 show_ir 里逐条曲线设。)
         for p in (self.time_plot, self.freq_plot):
-            p.plotItem.setDownsampling(auto=True, mode="peak")
-            p.plotItem.setClipToView(True)
             p.plotItem.setMouseEnabled(x=False, y=False)
             p.plotItem.setMenuEnabled(False)
+            # 坐标轴 (含 grid) 缓存成设备坐标 pixmap: 视图范围固定 (鼠标已关、
+            # Y 轴固定、X 轴 show_ir 时一次性 fit), 滚轮滚页面时 QGraphicsView
+            # 每帧重绘, 不缓存的话 grid 每帧重画 ~30 ms → 卡; 缓存后只 blit。
+            for ax in p.plotItem.axes.values():
+                ax["item"].setCacheMode(QGraphicsItem.DeviceCoordinateCache)
         v.addWidget(self.time_plot, 1)
         v.addWidget(self.freq_plot, 1)
 
@@ -177,14 +179,26 @@ class IRView(QWidget):
             # 之前除以 peak 会让任何 IR 的峰都画在 0 dB, 看起来像削顶,
             # 与频响图 (本就是绝对值) 的 -50 dB 自相矛盾。
             env = 20.0 * np.log10(np.abs(x[:, c]) + 1e-12)
-            self.time_plot.plot(t, env, pen=pen, name=name)
+            tc = self.time_plot.plot(t, env, pen=pen, name=name)
 
             m = int(early_ms * 1e-3 * fs)
             seg = x[:m, c] * np.hanning(min(m, n))[:min(m, n)]
             spec = 20.0 * np.log10(np.abs(np.fft.rfft(seg, n=8192)) + 1e-12)
             freqs = np.fft.rfftfreq(8192, 1.0 / fs)
             ok = freqs > 20
-            self.freq_plot.plot(freqs[ok], spec[ok], pen=pen)
+            # 逐条曲线开降采样 + clipToView + 关抗锯齿: IR 1 s = 4.8 万点/通道,
+            # 滚轮滚页面时 QScrollArea 重绘可见的图, 不降采样 + 抗锯齿每帧画
+            # 几万个反锯齿线段 → 卡死。peak 法保住窄直达峰不被均值抹掉;
+            # 关抗锯齿: 点这么密的包络看不出锯齿差别, 换来几十倍提速。useCache
+            # 已开, 首帧渲染成 pixmap 后滚轮只是位图拷贝。PlotItem 级的
+            # setDownsampling 不透传给之后才加的曲线, 必须拿到 PlotDataItem 逐条设。
+            for curve in (tc, self.freq_plot.plot(freqs[ok], spec[ok], pen=pen)):
+                curve.opts["antialias"] = False      # 见上方注释: 关抗锯齿换速度
+                curve.setDownsampling(auto=True, method="peak")
+                curve.setClipToView(True)
+                # 曲线也缓存成 pixmap: 数据/视图范围不变时滚轮重绘只 blit,
+                # 不再每帧光栅化几千条线段。换 IR 时 updateItems 会让缓存失效重画。
+                curve.curve.setCacheMode(QGraphicsItem.DeviceCoordinateCache)
         # 固定 0 dB 为顶 (全刻度), 峰就不会贴着顶被误读成削顶; -120 盖住噪底。
         self.time_plot.setYRange(-120, 0)
 
