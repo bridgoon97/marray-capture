@@ -43,6 +43,33 @@ class TakeIR:
             self.n_averaged = 1
 
 
+class PeakNotFoundError(RuntimeError):
+    """搜索窗内没有明显高于噪底的直达峰。
+
+    通常意味着输出设备的启动延迟超过了 max_latency_s (搜索窗), 或根本没录到信号。
+    这时若静默抓窗内 argmax 当峰, 下游会算出看似合理实则垃圾的 drift/NCC/DDR
+    (实测出现过 -4400 ppm、NCC 0.02 这种)。改成显式失败, 让用户去查
+    output_latency / 声卡驱动, 而不是被垃圾指标误导。
+    """
+
+
+# 真实直达峰在反卷积域里远高于噪底 (匹配滤波相干积分, 即使 SNR≈0 的弱扫频也有
+# ~42 dB prominence)。峰落在搜索窗外时, 窗内只剩噪底 + 启动脉冲的反卷积残渣,
+# prominence ~18-24 dB; 纯噪底 ~10 dB。30 dB 卡在中间, 两侧都留 6+ dB 余量。
+_PROMINENCE_DB = 30.0
+
+
+def _prominence_db(seg_e: np.ndarray, peak_idx: int) -> float:
+    """窗内峰能 vs 中位能 (dB)。真实直达峰 42+ dB; 峰落窗外/纯噪底时 10~24 dB。"""
+    if len(seg_e) < 8 or not (0 <= peak_idx < len(seg_e)):
+        return 0.0
+    peak = float(seg_e[peak_idx])
+    med = float(np.median(seg_e))
+    if peak <= 0.0 or med <= 0.0:
+        return 0.0
+    return 10.0 * np.log10(peak / med)
+
+
 def deconvolve_take(rec: np.ndarray, sweep: Sweep) -> np.ndarray:
     """整段录音反卷积。rec (T, C) → (T+N-1, C)。"""
     return deconvolve(np.asarray(rec, dtype=float), sweep)
@@ -56,20 +83,34 @@ def locate_peaks(
     energy_channels: list[int] | None = None,
     known_latency: int | None = None,
 ) -> tuple[list[int], int, float]:
-    """定位每次扫频的直达峰。返回 (峰位列表, 延迟样本数, 漂移 ppm)。"""
+    """定位每次扫频的直达峰。返回 (峰位列表, 延迟样本数, 漂移 ppm)。
+
+    抛 ``PeakNotFoundError`` 当搜索窗内没有明显高于噪底的峰 —— 多半是输出设备
+    启动延迟超过 max_latency_s, 这时抓噪声当峰会污染下游全部指标。
+    """
     fs = sweep.fs
     sub = deconv if energy_channels is None else deconv[:, energy_channels]
+    sub_e = (sub ** 2).sum(axis=1)        # 跨通道能量, 算一次复用
 
     # 第一次: 全局窗搜索 (或用已标定的延迟收窄)
     base = starts[0] + sweep.ir_offset
     if known_latency is not None:
-        first = find_direct_index(sub, expected=base + known_latency,
-                                  search_radius=int(0.05 * fs))
+        r = int(0.05 * fs)
+        first = find_direct_index(sub, expected=base + known_latency, search_radius=r)
+        lo, hi = max(0, base + known_latency - r), min(len(sub), base + known_latency + r)
     else:
         span = int(round(max_latency_s * fs))
         lo, hi = base, min(len(sub), base + span)
-        seg = (sub ** 2).sum(axis=1)[lo:hi]
-        first = int(lo + np.argmax(seg)) if len(seg) else base
+        first = int(lo + np.argmax(sub_e[lo:hi])) if hi > lo else base
+
+    # 护栏: 窗内峰若不明显高于噪底, 真实直达峰不在窗内, 别静默抓噪声当峰。
+    if _prominence_db(sub_e[lo:hi], first - lo) < _PROMINENCE_DB:
+        raise PeakNotFoundError(
+            f"在 {max_latency_s:.2f}s 搜索窗内未找到明显高于噪底的直达峰"
+            f" (峰仅比噪底高 {_prominence_db(sub_e[lo:hi], first - lo):.1f} dB)。"
+            f" 输出设备启动延迟可能远超搜索窗 —— 检查 output_latency 设置"
+            f" (实测过 8~19s 的) 与声卡驱动, 或调大 max_latency_s。"
+        )
 
     latency = first - base
     peaks = [first]

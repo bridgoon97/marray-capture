@@ -8,7 +8,9 @@ from scipy.signal import fftconvolve
 from marray_capture.audio.sweep import build_excitation, deconvolve, generate_ess
 from marray_capture.protocol.plan import build_plan, coarse_label
 from marray_capture.qc.metrics import evaluate_take
-from marray_capture.rir.extract import deconvolve_take, extract_take, resample_ir
+from marray_capture.rir.extract import (
+    PeakNotFoundError, deconvolve_take, extract_take, locate_peaks, resample_ir,
+)
 from marray_capture.rir import speaker_eq
 from marray_capture.settings import ProtocolConfig, QCThresholds
 
@@ -158,6 +160,47 @@ def test_qc_ignores_startup_transient():
     )
     assert "削顶" not in qc.summary(), qc.summary()
     assert qc.verdict == "PASS", qc.summary()
+
+
+def test_locate_peaks_raises_when_peak_outside_window():
+    """真实直达峰落在搜索窗外 (输出设备延迟超过 max_latency_s) 时, locate_peaks
+    必须抛 PeakNotFoundError, 而不是静默抓窗内噪声当峰 —— 后者会污染下游
+    drift/NCC/DDR 成看似合理实则垃圾的值 (实测 -4400ppm、NCC 0.02)。
+
+    复现: 把扫频放在搜索窗之外 (这里把 latency 设得比 max_latency 大很多)。
+    """
+    sw = generate_ess(FS, 40, 20000, 2.0)
+    exc, starts = build_excitation(sw, 2, 1.0, 0.8, 1.0, 0.5)
+    ir = make_ir()
+    # 延迟 3 秒: 真实峰在 base + 3s 处, 而 max_latency 只给 1s → 搜不到
+    rec = simulate(exc, ir, latency=int(3.0 * FS), snr_db=50.0, seed=3)
+    deconv = deconvolve_take(rec, sw)
+    with pytest.raises(PeakNotFoundError):
+        locate_peaks(deconv, sw, starts, max_latency_s=1.0,
+                     energy_channels=[0, 1, 2])
+
+
+def test_qc_flags_dead_channel():
+    """同一源下某条麦比最响麦低 30 dB 以上 → 标'疑似死通道', 别只说'SNR 偏低'。
+
+    复现: 把第二条麦的 IR 缩到 -40 dB (没接/接错), 第一条正常。QC 应给出
+    '疑似死通道' 的具体原因。
+    """
+    sw = generate_ess(FS, 40, 20000, 2.0)
+    exc, starts = build_excitation(sw, 2, 1.0, 0.8, 1.0, 0.5)
+    ir = make_ir()
+    ir[:, 1] *= 0.01          # 第二条麦衰减 40 dB, 模拟死通道
+    rec = simulate(exc, ir, latency=int(0.1 * FS), snr_db=50.0, seed=5)
+    deconv = deconvolve_take(rec, sw)
+    take = extract_take(deconv, sw, starts, 5.0, 200.0, 1.0, energy_channels=[0, 1, 2])
+    qc = evaluate_take(
+        rec=rec, deconv=deconv, ir_list=take.irs, ir_avg=take.ir_avg,
+        peaks=take.direct_indices, latency=take.latency_samples,
+        drift_ppm=take.drift_ppm, starts=starts, sweep_n=sw.n,
+        pre_samples=take.pre_samples, fs=FS,
+        labels=["mic1", "dead", "mic3"], mic_cols=[0, 1, 2], thr=QCThresholds(),
+    )
+    assert any("死通道" in r for r in qc.reasons), qc.summary()
 
 
 def test_qc_catches_movement_between_sweeps():

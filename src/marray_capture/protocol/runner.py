@@ -27,7 +27,10 @@ from ..audio import prompts as P
 from ..audio.engine import AudioEngine, EngineError, map_levels, slice_channels
 from ..audio.sweep import Sweep, build_excitation, generate_ess
 from ..qc.metrics import FAIL, TakeQC, evaluate_take
-from ..rir.extract import correct_drift, deconvolve_take, extract_take, resample_ir
+from ..rir.extract import (
+    PeakNotFoundError, TakeIR, correct_drift, deconvolve_take, extract_take,
+    resample_ir,
+)
 from ..settings import AppSettings
 from ..store import Session
 from .plan import Plan, Step
@@ -222,25 +225,37 @@ class SessionRunner:
         self.hooks.call("on_state", "反卷积与质检…")
         deconv = deconvolve_take(rec, self.sweep)
         # 搜索窗要同时覆盖保护间隔和设备延迟 —— 录音是在播放之前 guard_s 就开始的
-        take = extract_take(
-            deconv, self.sweep, starts,
-            ir_pre_ms=st.export.ir_pre_ms, ir_len_ms=st.export.ir_len_ms,
-            max_latency_s=st.sweep.guard_s + st.sweep.max_latency_s,
-            energy_channels=self.mic_cols or None,
-            known_latency=st.audio.measured_latency_samples,
-            average=st.export.average_repeats,
-        )
-        qc = evaluate_take(
-            rec=rec, deconv=deconv, ir_list=take.irs, ir_avg=take.ir_avg,
-            peaks=take.direct_indices, latency=take.latency_samples,
-            drift_ppm=take.drift_ppm, starts=starts, sweep_n=self.sweep.n,
-            pre_samples=take.pre_samples, fs=fs, labels=self.ch_labels,
-            mic_cols=self.mic_cols, thr=st.qc, stream_warnings=warnings,
-            vpu_cols=self.vpu_cols,
-        )
-        # 一致性不过就别平均, 亚样本错位会梳状衰减高频
-        if qc.repeat_ncc == qc.repeat_ncc and qc.repeat_ncc < st.qc.min_repeat_ncc:
-            take.use_single()
+        try:
+            take = extract_take(
+                deconv, self.sweep, starts,
+                ir_pre_ms=st.export.ir_pre_ms, ir_len_ms=st.export.ir_len_ms,
+                max_latency_s=st.sweep.guard_s + st.sweep.max_latency_s,
+                energy_channels=self.mic_cols or None,
+                known_latency=st.audio.measured_latency_samples,
+                average=st.export.average_repeats,
+            )
+            qc = evaluate_take(
+                rec=rec, deconv=deconv, ir_list=take.irs, ir_avg=take.ir_avg,
+                peaks=take.direct_indices, latency=take.latency_samples,
+                drift_ppm=take.drift_ppm, starts=starts, sweep_n=self.sweep.n,
+                pre_samples=take.pre_samples, fs=fs, labels=self.ch_labels,
+                mic_cols=self.mic_cols, thr=st.qc, stream_warnings=warnings,
+                vpu_cols=self.vpu_cols,
+            )
+            # 一致性不过就别平均, 亚样本错位会梳状衰减高频
+            if qc.repeat_ncc == qc.repeat_ncc and qc.repeat_ncc < st.qc.min_repeat_ncc:
+                take.use_single()
+        except PeakNotFoundError as e:
+            # 直达峰定位失败 (设备延迟超搜索窗/没录到信号): 不反卷积下游,
+            # 直接记 FAIL, 让用户去查 output_latency/声卡, 而不是被垃圾指标误导。
+            pre = int(round(st.export.ir_pre_ms * 1e-3 * fs))
+            length = int(round(st.export.ir_len_ms * 1e-3 * fs))
+            take = TakeIR(
+                ir_avg=np.zeros((length, rec.shape[1]), dtype=float),
+                direct_indices=[0], latency_samples=0, pre_samples=pre,
+                fs=fs, n_averaged=1)
+            qc = TakeQC(drift_ppm=0.0, latency_ms=0.0, stream_warnings=warnings)
+            qc.worsen(FAIL, str(e))
 
         files = self._persist(step, rec, take, attempt)
         record = {

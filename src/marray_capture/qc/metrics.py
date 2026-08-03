@@ -262,6 +262,20 @@ def _apply_thresholds(qc: TakeQC, thr: QCThresholds, mic_cols: list[int],
         if i in mic_cols:
             check(ch.reliable_bw_hz, thr.min_reliable_bw_hz, True, f"{ch.label} 可靠带宽", " Hz")
 
+    # 死通道检测: 同一次采集里所有麦录的是同一个源, 直达峰应在彼此 ~十几 dB 内。
+    # 某条麦比最响的那条低 30 dB 以上, 几乎肯定是没接/接错/增益没开 —— 不是"SNR 偏低"
+    # 能解释的。单独标出来, 让用户去通道表里取消该通道的麦角色, 而不是整场当废片。
+    mic_peaks = [qc.channels[i].ir_peak_db for i in mic_cols
+                 if qc.channels[i].ir_peak_db == qc.channels[i].ir_peak_db]
+    if mic_peaks:
+        loudest = max(mic_peaks)
+        for i in mic_cols:
+            ch = qc.channels[i]
+            if ch.ir_peak_db == ch.ir_peak_db and loudest - ch.ir_peak_db > 30.0:
+                qc.worsen(FAIL, f"{ch.label} 疑似死通道/未接线 (直达峰 {ch.ir_peak_db:.0f} dB, "
+                                f"比最响麦低 {loudest - ch.ir_peak_db:.0f} dB) — "
+                                f"在通道表里取消该通道的麦角色")
+
     check(qc.repeat_ncc, thr.min_repeat_ncc, True, "两次扫频一致性", "")
     check(abs(qc.repeat_level_diff_db), thr.max_repeat_level_diff_db, False, "两次扫频电平差", " dB")
     check(abs(qc.drift_ppm), thr.max_drift_ppm, False, "时钟漂移", " ppm")
