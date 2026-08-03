@@ -230,6 +230,11 @@ ILD / DRR 的依据。
 
 ---
 
+## 给 agent / 新接手的人
+
+仓库约定、会静默出错的地方、已经做过不要推翻的决定，都写在
+**[AGENTS.md](AGENTS.md)**（`CLAUDE.md` 指向同一份）。
+
 ## 第三方与 vendored 代码
 
 - `src/marray_capture/rir/rir_augment/` 是作者自己的 `rir-augment` 项目的内嵌副本

@@ -35,6 +35,7 @@ packages = ["src/marray_capture"]
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+    "pyflakes>=3.2",
 ]
 
 [tool.uv]

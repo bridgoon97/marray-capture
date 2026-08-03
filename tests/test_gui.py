@@ -316,3 +316,35 @@ def test_main_window_builds_all_tabs(qapp, settings):
     qapp.processEvents()
     assert len(w.plan.measures) > 0
     assert w.page_plan.tbl.rowCount() == len(w.plan.steps)
+
+
+def test_generated_param_doc_is_in_sync():
+    """docs/protocol-params.md 必须与 notes.PARAMS 同步。
+
+    它由 `marray-capture --dump-params` 生成 —— 手改那个 md 会被下次生成覆盖，
+    所以这里卡一道, 提醒改的是 PARAMS 而不是文档。
+    """
+    from pathlib import Path
+
+    from marray_capture.gui import notes
+
+    doc = Path(__file__).resolve().parents[1] / "docs" / "protocol-params.md"
+    assert doc.exists(), "docs/protocol-params.md 不存在"
+    expected = notes.params_markdown().rstrip() + "\n"
+    actual = doc.read_text(encoding="utf-8").rstrip() + "\n"
+    assert actual == expected, (
+        "docs/protocol-params.md 与 notes.PARAMS 不同步。"
+        "运行: uv run marray-capture --dump-params > docs/protocol-params.md")
+
+
+def test_agent_docs_exist():
+    """AGENTS.md 是给后续 agent 的说明, CLAUDE.md 指向它。"""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    agents = (root / "AGENTS.md").read_text(encoding="utf-8")
+    claude = (root / "CLAUDE.md").read_text(encoding="utf-8")
+    assert "AGENTS.md" in claude, "CLAUDE.md 应指向 AGENTS.md"
+    # 那些会静默出错的地方必须在里面写清楚
+    for topic in ("麦序号", "map_levels", "guard", "clicked", "QSS", "WASAPI"):
+        assert topic in agents, f"AGENTS.md 少了 {topic} 这一条"
