@@ -109,7 +109,7 @@ class PlanPage(QWidget):
         self.sp_gap = QDoubleSpinBox(); self.sp_gap.setRange(0.2, 10.0); self.sp_gap.setSuffix(" s")
         self.sp_pre = QDoubleSpinBox(); self.sp_pre.setRange(0.5, 10.0); self.sp_pre.setSuffix(" s")
         self.sp_tail = QDoubleSpinBox(); self.sp_tail.setRange(0.5, 10.0); self.sp_tail.setSuffix(" s")
-        self.sp_maxlat = QDoubleSpinBox(); self.sp_maxlat.setRange(0.1, 3.0); self.sp_maxlat.setSuffix(" s")
+        self.sp_maxlat = QDoubleSpinBox(); self.sp_maxlat.setRange(0.1, 30.0); self.sp_maxlat.setSuffix(" s")
         self.sp_amp = QDoubleSpinBox(); self.sp_amp.setRange(0.05, 1.0); self.sp_amp.setSingleStep(0.05)
         f2.addRow("起始频率", self.sp_f1)
         f2.addRow("终止频率", self.sp_f2)
