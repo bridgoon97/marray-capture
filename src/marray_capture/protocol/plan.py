@@ -261,7 +261,7 @@ def build_plan(cfg: ProtocolConfig, seed: int = 2026) -> Plan:
     counter[0] += 1
     steps.append(Step(
         idx=counter[0], kind="setup",
-        instruction="本轮采集结束，谢谢。请先不要摘耳机，等一下要录一段自声探针。",
+        instruction="本轮采集结束，谢谢。",
         settle_s=2.0, tag="grid",
         subject_id=cfg.subject_id, wearing_id=cfg.wearing_id, side=cfg.side,
     ))
