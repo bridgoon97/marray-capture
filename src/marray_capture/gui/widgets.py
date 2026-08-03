@@ -143,6 +143,17 @@ class IRView(QWidget):
         self.freq_plot.setLabel("left", "幅度", units="dB")
         self.freq_plot.setLogMode(x=True, y=False)
         self.freq_plot.showGrid(x=True, y=True, alpha=0.3)
+        # IR 默认 1 s 长 (48 kHz = 4.8 万点/通道), 不降采样的话平移/缩放每帧
+        # 都重绘全部点 → 交互卡顿。clipToView 让视口外的点不参与重绘,
+        # peak 降采样保住尖峰不被均值抹平 (直达峰是窄脉冲, mean 会矮掉)。
+        # 进一步把鼠标平移/缩放/右键菜单全关掉 —— 这套界面是三米外看的
+        # 采集仪器, 不需要鼠标在图上拖拽探查; 关掉既杜绝交互卡顿, 也免得
+        # 误操作把视图拖飞。需要细看时去会话目录拿原始 IR 文件。
+        for p in (self.time_plot, self.freq_plot):
+            p.plotItem.setDownsampling(auto=True, mode="peak")
+            p.plotItem.setClipToView(True)
+            p.plotItem.setMouseEnabled(x=False, y=False)
+            p.plotItem.setMenuEnabled(False)
         v.addWidget(self.time_plot, 1)
         v.addWidget(self.freq_plot, 1)
 
@@ -157,12 +168,15 @@ class IRView(QWidget):
             x = x.T
         n, ch = x.shape
         t = np.arange(n) / fs * 1000.0
-        peak = float(np.max(np.abs(x))) or 1.0
         self.time_plot.addLegend(offset=(-10, 10))
         for c in range(ch):
             name = labels[c] if labels and c < len(labels) else f"ch{c + 1}"
             pen = pg.mkPen(theme.PLOT_SERIES[c % len(theme.PLOT_SERIES)], width=1.2)
-            env = 20.0 * np.log10(np.abs(x[:, c]) / peak + 1e-6)
+            # 绝对 dB, 不做峰值归一: 逆滤波器已把自卷积峰归一到 1, 所以 IR 的
+            # 0 dB = 全刻度直通, 真实录制远低于此 (麦+音箱+距离都是衰减)。
+            # 之前除以 peak 会让任何 IR 的峰都画在 0 dB, 看起来像削顶,
+            # 与频响图 (本就是绝对值) 的 -50 dB 自相矛盾。
+            env = 20.0 * np.log10(np.abs(x[:, c]) + 1e-12)
             self.time_plot.plot(t, env, pen=pen, name=name)
 
             m = int(early_ms * 1e-3 * fs)
@@ -171,7 +185,8 @@ class IRView(QWidget):
             freqs = np.fft.rfftfreq(8192, 1.0 / fs)
             ok = freqs > 20
             self.freq_plot.plot(freqs[ok], spec[ok], pen=pen)
-        self.time_plot.setYRange(-100, 5)
+        # 固定 0 dB 为顶 (全刻度), 峰就不会贴着顶被误读成削顶; -120 盖住噪底。
+        self.time_plot.setYRange(-120, 0)
 
 
 def notes_html(items: list, max_width: int = 0) -> str:
