@@ -98,7 +98,9 @@ def locate_peaks(
     # 回退全局窗再搜 —— 标定值是上次跑的, 这次实际延迟可能差几十 ms (WASAPI
     # 共享模式启动抖动), 死守窄窗会把好峰判成"找不到"。
     if known_latency is not None:
-        r = int(0.05 * fs)
+        # ±100ms: WASAPI 共享模式启动延迟每次抖几十 ms (实测过 104/193/186ms),
+        # 标定值是上次的, 窗太窄 (原 ±50ms) 会把延迟漂移的那条误杀走回退。
+        r = int(0.10 * fs)
         first = find_direct_index(sub, expected=base + known_latency, search_radius=r)
         lo, hi = max(0, base + known_latency - r), min(len(sub), base + known_latency + r)
         if _prominence_db(sub_e[lo:hi], first - lo) < _PROMINENCE_DB:
