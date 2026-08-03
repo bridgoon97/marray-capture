@@ -35,8 +35,7 @@ class QCPage(QWidget):
 
     def _build(self) -> None:
         root = QVBoxLayout(self)
-        self.note_card = notes.build_note_card("qc", self.settings)
-        root.addWidget(self.note_card)
+        self.notes_btn = notes.build_notes_button("qc", self.settings)
 
         bar = QHBoxLayout()
         self.cb_session = QComboBox()
@@ -55,6 +54,7 @@ class QCPage(QWidget):
         bar.addWidget(btn_rerun)
         bar.addWidget(btn_open)
         bar.addStretch(1)
+        bar.addWidget(self.notes_btn)
         root.addLayout(bar)
 
         self.lb_stats = QLabel("-")

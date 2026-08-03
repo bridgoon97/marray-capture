@@ -82,6 +82,46 @@ class AudioEngine:
         while self._pump(q, sink, level_cb, 0.0):
             pass
 
+    # -------------------------------------------------------------- 通道数协商
+    def _open_input(self, factory, want: int):
+        """开流, 打不开就退到「声卡的全部输入通道数」再试一次。
+
+        WASAPI 共享模式只接受端点混音格式的**完整通道数** —— 8 通道的卡上请求 5 个
+        会直接报 "Invalid number of channels"。所以只能全开再切片, 代价只是多录几路。
+        """
+        from . import devices as _dev
+
+        override = int(self.cfg.input_channels_override or 0)
+        info = _dev.describe(self.cfg.input_device)
+        full = int(info.max_input) if info else 0
+
+        attempts: list[int] = []
+        for n in (override, want, full):
+            if n and n >= want and n not in attempts:
+                attempts.append(n)
+        if not attempts:
+            attempts = [max(1, want)]
+
+        last: Exception | None = None
+        for n in attempts:
+            try:
+                stream = factory(n)
+                if n != want:
+                    self.cfg.input_channels_override = n     # 记住, 下次别再试错
+                    self.last_warnings = (
+                        f"声卡不接受 {want} 通道, 已按 {n} 通道打开再切片"
+                        "（WASAPI 共享模式的常见限制）")
+                return stream
+            except sd.PortAudioError as e:
+                last = e
+                continue
+        hint = ("WASAPI 共享模式必须按声卡的完整输入通道数打开; "
+                "另外确认「控制面板 → 声音 → 录制 → 属性 → 高级」里的采样率与软件一致。")
+        if _dev.is_asio(self.cfg.input_device) or _dev.is_asio(self.cfg.output_device):
+            hint = ("ASIO 驱动单实例独占 —— 输入和输出必须选同一个 ASIO 条目, "
+                    "收发模式设「自动」或「强制全双工」; 采样率/缓冲区也要与驱动面板一致。")
+        raise EngineError(f"打开输入流失败（试过 {attempts} 个通道数）: {last}\n{hint}")
+
     # ------------------------------------------------------------------ 模式
     def use_duplex(self) -> bool:
         """是否走全双工单流。"""
@@ -135,7 +175,8 @@ class AudioEngine:
 
         out_buf = np.zeros((total, n_out), dtype=np.float32)
         out_buf[guard: guard + len(play_buf)] = play_buf
-        rec = np.zeros((total, n_in_channels), dtype=np.float32)
+        # 实际通道数要等开流协商完才知道 (见 _open_input), 所以在首个回调里再分配
+        state: dict[str, np.ndarray | None] = {"rec": None}
 
         pos = {"i": 0}
         warnings: set[str] = set()
@@ -146,13 +187,15 @@ class AudioEngine:
         def cb(indata, outdata, frames, time_info, status):  # noqa: ANN001
             if status:
                 warnings.add(f"全双工流 xrun: {status}")
+            if state["rec"] is None:
+                state["rec"] = np.zeros((total, indata.shape[1]), dtype=np.float32)
             i = pos["i"]
             n = min(frames, total - i)
             outdata[:n] = out_buf[i: i + n]
             if n < frames:
                 outdata[n:] = 0.0
             if n > 0:
-                rec[i: i + n] = indata[:n]
+                state["rec"][i: i + n] = indata[:n]
             pos["i"] = i + n
             # 电平不在音频线程里算完就发, 只丢进队列, 由等待循环取
             blk["n"] += 1
@@ -167,15 +210,18 @@ class AudioEngine:
             if pos["i"] >= total:
                 raise sd.CallbackStop
 
-        try:
-            stream = sd.Stream(
+        def factory(n_in: int):
+            return sd.Stream(
                 device=(self.cfg.input_device, self.cfg.output_device),
-                channels=(n_in_channels, n_out),
+                channels=(n_in, n_out),
                 samplerate=fs, dtype="float32",
                 blocksize=int(self.cfg.blocksize or 0),
                 latency=(self.cfg.input_latency, self.cfg.output_latency),
                 callback=cb, finished_callback=finished.set,
             )
+
+        try:
+            stream = self._open_input(factory, n_in_channels)
             with stream:
                 # 给足余量: 缓冲区时长 + 5 秒, 防止驱动异常时死等
                 deadline = time.monotonic() + total / fs + 5.0
@@ -192,11 +238,13 @@ class AudioEngine:
         finally:
             self._drain_levels(level_q, level_cb)
 
-        self.last_warnings = "; ".join(sorted(warnings))
+        self.last_warnings = "; ".join(
+            x for x in ([self.last_warnings] + sorted(warnings)) if x)
         if self._abort.is_set():
             raise EngineError("已中止")
         got = pos["i"]
-        if got <= 0:
+        rec = state["rec"]
+        if rec is None or got <= 0:
             raise EngineError("没有录到任何数据, 检查输入设备")
         return rec[:got]
 
@@ -257,11 +305,11 @@ class AudioEngine:
                 raise sd.CallbackStop
 
         blocksize = int(self.cfg.blocksize or 0)
-        in_stream = sd.InputStream(
-            device=self.cfg.input_device, channels=n_in_channels, samplerate=fs,
+        in_stream = self._open_input(lambda n: sd.InputStream(
+            device=self.cfg.input_device, channels=n, samplerate=fs,
             dtype="float32", blocksize=blocksize,
             latency=self.cfg.input_latency, callback=in_cb,
-        )
+        ), n_in_channels)
         out_stream = sd.OutputStream(
             device=self.cfg.output_device, channels=max(1, int(self.cfg.output_channels)),
             samplerate=fs, dtype="float32", blocksize=blocksize,
@@ -301,7 +349,8 @@ class AudioEngine:
                     pass
             self._drain_rest(rec_q, chunks, level_cb)
 
-        self.last_warnings = "; ".join(sorted(warnings))
+        self.last_warnings = "; ".join(
+            x for x in ([self.last_warnings] + sorted(warnings)) if x)
         if self._abort.is_set():
             raise EngineError("已中止")
         if not chunks:
@@ -326,11 +375,11 @@ class AudioEngine:
             if self._abort.is_set():
                 raise sd.CallbackAbort
 
-        stream = sd.InputStream(
-            device=self.cfg.input_device, channels=n_in_channels, samplerate=fs,
+        stream = self._open_input(lambda n: sd.InputStream(
+            device=self.cfg.input_device, channels=n, samplerate=fs,
             dtype="float32", blocksize=int(self.cfg.blocksize or 0),
             latency=self.cfg.input_latency, callback=in_cb,
-        )
+        ), n_in_channels)
         need = int(round(seconds * fs))
         got, idle = 0, 0
         try:
@@ -364,6 +413,19 @@ class AudioEngine:
             sd.wait()
         except Exception:
             pass
+
+
+def map_levels(rms: np.ndarray, indices: list[int]) -> np.ndarray:
+    """把逐通道 RMS 从**声卡物理顺序**映射到落盘顺序。
+
+    引擎的电平回调拿到的是原始 indata, 列序是物理通道号; 而电平表的标签是按
+    「麦序号 → VPU → 参考麦」重排过的。不映射的话标签和读数会对不上 ——
+    你会看到 mic1 那一行显示的其实是 ch1 的电平。
+    """
+    r = np.atleast_1d(np.asarray(rms, dtype=float)).ravel()
+    if not indices or len(r) <= max(indices):
+        return r
+    return r[list(indices)]
 
 
 def slice_channels(rec: np.ndarray, indices: list[int]) -> np.ndarray:

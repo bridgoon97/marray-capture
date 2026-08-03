@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 
 from ..rir import speaker_eq
 from ..rir.augment_runner import default_config, parse_coords, run_augment, select_inputs
+from ..protocol.runner import record_reference_ir
 from ..settings import AppSettings
 from ..store import Session, list_sessions
 from . import notes
@@ -62,8 +63,11 @@ class PostPage(QWidget):
     # ------------------------------------------------------------------ 布局
     def _build(self) -> None:
         outer = QVBoxLayout(self)
-        self.note_card = notes.build_note_card("post", self.settings)
-        outer.addWidget(self.note_card)
+        self.notes_btn = notes.build_notes_button("post", self.settings)
+        bar0 = QHBoxLayout()
+        bar0.addStretch(1)
+        bar0.addWidget(self.notes_btn)
+        outer.addLayout(bar0)
         root = QHBoxLayout()
         outer.addLayout(root, 1)
         left = QVBoxLayout()
@@ -107,6 +111,9 @@ class PostPage(QWidget):
         self.ck_eq = QCheckBox("增强前先去音箱响应")
         btn_design = QPushButton("设计反滤波器并预览")
         btn_design.clicked.connect(self.design_eq)
+        self.btn_rec_ref = QPushButton("现在录一条参考 IR（整场只需一次）")
+        self.btn_rec_ref.clicked.connect(self.record_reference)
+        f1.addRow("", self.btn_rec_ref)
         f1.addRow("参考 IR", ref_row)
         f1.addRow("参考通道 (-1=自动选最强)", self.sp_ref_ch)
         f1.addRow("反演下限", self.sp_eq_lo)
@@ -274,9 +281,9 @@ class PostPage(QWidget):
                 "扩散尾的通道间相干性完全由它决定，务必与实物一致。")
         except Exception as e:
             self.lb_geom.setText(f"⚠ 几何无效：{e}")
-        card = getattr(self, "note_card", None)
-        if card is not None:      # 麦克风数变了, 自定义坐标那条要跟着出现/消失
-            card.set_notes(notes.notes_for("post", self.settings))
+        btn = getattr(self, "notes_btn", None)
+        if btn is not None:       # 麦克风数变了, 自定义坐标那条要跟着出现/消失
+            btn.refresh()
 
     def _cfg(self) -> dict:
         cfg = default_config()
@@ -298,6 +305,51 @@ class PostPage(QWidget):
         return cfg
 
     # ------------------------------------------------------------------ 动作
+    def record_reference(self) -> None:
+        """一次性录音箱参考 IR。
+
+        音箱频响不随位置变化, 所以整场只需要录一条 —— 不用每个角度都来一遍。
+        也不必长期固定某个通道当参考麦: 只要录这一条时测量麦插在某个被勾选的通道上,
+        下面的「参考通道」挑出那一列即可。
+        """
+        session = self.get_session()
+        if session is None:
+            QMessageBox.information(
+                self, "录参考 IR", "先在主界面上方建一个会话（参考 IR 会存进会话目录）。")
+            return
+        if QMessageBox.question(
+            self, "录参考 IR",
+            "把测量麦放到音箱正轴、约 1 米处，对准音箱；房间保持安静。\n"
+            "会播一次扫频（约十几秒）。现在开始吗？",
+        ) != QMessageBox.Yes:
+            return
+
+        self.btn_rec_ref.setEnabled(False)
+        self.log.append("正在录参考 IR，请保持安静…")
+        self._worker = Worker(record_reference_ir, self.settings, session)
+
+        def ok(res: dict) -> None:
+            self.btn_rec_ref.setEnabled(True)
+            self.le_ref.setText(res["path"])
+            if res["ref_col"] >= 0:
+                self.sp_ref_ch.setValue(res["ref_col"])
+                self.log.append(f"通道表里标了参考麦，已自动选中第 {res['ref_col']} 列。")
+            else:
+                self.log.append(
+                    "通道表里没有标 ref 的通道 —— 在下面的「参考通道」里选测量麦所在的那一列，"
+                    "或者留 -1 让软件自动挑能量最强的一路。")
+            self.log.append(f"已保存 {res['path']}")
+            if res["warnings"]:
+                self.log.append(f"⚠ {res['warnings']}")
+            self.view.show_ir(res["ir"], res["fs"], res["labels"])
+
+        self._worker.done.connect(ok)
+        self._worker.failed.connect(lambda e: (
+            self.btn_rec_ref.setEnabled(True),
+            QMessageBox.critical(self, "录制失败", e.splitlines()[0]),
+            self.log.append("✗ " + e.splitlines()[0])))
+        self._worker.start()
+
     def pick_ref(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "选择参考 IR", "", "WAV (*.wav)")
         if path:

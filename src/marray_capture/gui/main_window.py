@@ -17,6 +17,7 @@ from .plan_page import PlanPage
 from .post_page import PostPage
 from .qc_page import QCPage
 from .run_page import RunPage
+from .widgets import scrollable
 
 
 class MainWindow(QMainWindow):
@@ -26,7 +27,9 @@ class MainWindow(QMainWindow):
         self.plan: Plan | None = None
         self._session: Session | None = None
         self.setWindowTitle("marray-capture —— 干扰人扫频实录采集")
-        self.resize(1440, 900)
+        # 1440p 笔记本 (常见 150% 缩放 → 有效 1707x960) 也要放得下; 内容超了走滚动
+        self.resize(1240, 800)
+        self.setMinimumSize(900, 600)
         self._build()
 
     # ------------------------------------------------------------------ 布局
@@ -63,11 +66,12 @@ class MainWindow(QMainWindow):
         self.page_run = RunPage(self.settings, self.get_session, lambda: self.plan)
         self.page_qc = QCPage(self.settings, self.get_session_optional, self.rerun)
         self.page_post = PostPage(self.settings, self.get_session_optional)
-        self.tabs.addTab(self.page_device, "1 设备")
-        self.tabs.addTab(self.page_plan, "2 方案")
-        self.tabs.addTab(self.page_run, "3 采集")
-        self.tabs.addTab(self.page_qc, "4 质检")
-        self.tabs.addTab(self.page_post, "5 后处理")
+        # 每页套一层滚动区 —— 表单很长, 小屏上必须能滚
+        self.tabs.addTab(scrollable(self.page_device), "1 设备")
+        self.tabs.addTab(scrollable(self.page_plan), "2 方案")
+        self.tabs.addTab(scrollable(self.page_run), "3 采集")
+        self.tabs.addTab(scrollable(self.page_qc), "4 质检")
+        self.tabs.addTab(scrollable(self.page_post), "5 后处理")
         self.tabs.currentChanged.connect(self._on_tab)
         root.addWidget(self.tabs, 1)
 
@@ -75,9 +79,12 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("先在「设备」页选好声卡与通道, 再去「方案」页生成采集方案。")
 
     def _on_tab(self, idx: int) -> None:
-        if self.tabs.widget(idx) is self.page_qc:
+        # 页签里装的是滚动区, 真正的页面在它的 widget() 里
+        area = self.tabs.widget(idx)
+        page = area.widget() if hasattr(area, "widget") else area
+        if page is self.page_qc:
             self.page_qc.refresh()
-        elif self.tabs.widget(idx) is self.page_post:
+        elif page is self.page_post:
             self.page_post.refresh()
 
     # ------------------------------------------------------------------ 会话
@@ -114,7 +121,11 @@ class MainWindow(QMainWindow):
         return None
 
     def rerun(self, take_ids: set[str]) -> None:
-        self.tabs.setCurrentWidget(self.page_run)
+        for i in range(self.tabs.count()):
+            area = self.tabs.widget(i)
+            if getattr(area, "widget", lambda: None)() is self.page_run:
+                self.tabs.setCurrentIndex(i)
+                break
         self.page_run.rerun(take_ids)
 
     # ------------------------------------------------------------------ 配置

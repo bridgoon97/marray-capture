@@ -51,11 +51,9 @@ class RunPage(QWidget):
         top.addWidget(self.lb_session, 1)
         top.addWidget(self.lb_progress)
         top.addWidget(self.pb)
+        self.notes_btn = notes.build_notes_button("run", self.settings)
+        top.addWidget(self.notes_btn)
         root.addLayout(top)
-
-        # 默认折叠 —— 采集时不该有阅读材料, 需要时点开
-        self.note_card = notes.build_note_card("run", self.settings)
-        root.addWidget(self.note_card)
 
         # ---- 主角: 指令卡。占满上部, 三米开外可读
         self.card = InstructionCard()
@@ -111,7 +109,9 @@ class RunPage(QWidget):
         mid.addLayout(right, 5)
         root.addLayout(mid, 1)
 
-        self.btn_start.clicked.connect(self.start)
+        # 注意: clicked 会带一个 bool(checked) 实参, 直接接 start 会被当成
+        # only_take_ids 传进去, 运行时炸在 "argument of type bool is not iterable"
+        self.btn_start.clicked.connect(lambda: self.start())
         self.btn_pause.clicked.connect(self.toggle_pause)
         self.btn_redo.clicked.connect(lambda: self.runner and self.runner.redo())
         self.btn_skip.clicked.connect(lambda: self.runner and self.runner.skip())

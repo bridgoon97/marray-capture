@@ -8,8 +8,8 @@ import pyqtgraph as pg
 from PySide6.QtCore import QObject, QThread, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QFrame, QGroupBox, QHBoxLayout, QLabel, QProgressBar, QPushButton,
-    QVBoxLayout, QWidget,
+    QDialog, QFrame, QGroupBox, QHBoxLayout, QLabel, QProgressBar, QPushButton,
+    QScrollArea, QVBoxLayout, QWidget,
 )
 
 from . import theme
@@ -156,98 +156,103 @@ class IRView(QWidget):
         self.time_plot.setYRange(-100, 5)
 
 
-class NoteCard(QWidget):
-    """每个环节的注意事项卡片。可折叠, 折叠状态记进配置。
+def notes_html(items: list, max_width: int = 0) -> str:
+    """把注意事项渲染成富文本。tooltip 和小窗共用同一段渲染。"""
+    if not items:
+        return "<i>这一步没有特别要注意的。</i>"
+    rows = []
+    for n in items:
+        color, tint = theme.NOTE_LEVEL.get(n.level, (theme.INK_MUTED, theme.PAPER))
+        chip = (f"<span style='background:{tint}; color:{color}; "
+                f"padding:1px 5px; border-radius:3px; font-weight:600;'>"
+                f"{theme.NOTE_LABEL.get(n.level, '')}</span>")
+        rows.append(
+            f"<tr><td valign='top' style='padding:0 8px 8px 0; white-space:nowrap;'>{chip}</td>"
+            f"<td valign='top' style='padding:0 0 8px 0; line-height:155%;'>{n.text}</td></tr>")
+    width = f" width='{max_width}'" if max_width else ""
+    return f"<table cellspacing='0' cellpadding='0'{width}>{''.join(rows)}</table>"
 
-    刻意做得安静 —— 招牌色留给采集页的判定色条。这里只用一个分级小标签
-    （必看 / 注意 / 提示）区分轻重, 不抢视线。
+
+class InfoDialog(QDialog):
+    """一个通用的只读小窗: 标题 + 可滚动富文本。注意事项和参数说明都用它。"""
+
+    def __init__(self, title: str, html: str, parent=None, size=(660, 560)):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(False)                     # 非模态: 可以边看边改
+        self.resize(*size)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        self.area = QScrollArea()
+        self.area.setWidgetResizable(True)
+        self.area.setFrameShape(QFrame.NoFrame)
+        self.label = QLabel()
+        self.label.setWordWrap(True)
+        self.label.setTextFormat(Qt.RichText)
+        self.label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.label.setAlignment(Qt.AlignTop)
+        self.label.setContentsMargins(16, 14, 16, 16)
+        self.area.setWidget(self.label)
+        v.addWidget(self.area)
+        self.set_html(html)
+
+    def set_html(self, html: str) -> None:
+        self.label.setText(html)
+
+
+class NotesButton(QPushButton):
+    """页面角上的「注意事项」按钮: 悬停看摘要, 点开看小窗。
+
+    之前是常驻的卡片, 但在 1440p 笔记本上它会把下面的表单挤出屏幕 ——
+    注意事项是**偶尔查**的东西, 不该长期占版面。
     """
 
-    toggled = Signal(bool)          # True = 已折叠
-
-    def __init__(self, page: str, collapsed: bool = False, parent=None):
+    def __init__(self, page: str, settings, parent=None):
         super().__init__(parent)
         self.page = page
-        self._collapsed = collapsed
+        self.settings = settings
         self._notes: list = []
+        self._dialog: InfoDialog | None = None
+        self.setCursor(Qt.PointingHandCursor)
+        self.clicked.connect(self.open_dialog)
+        self.refresh()
 
-        # 限宽 + 右侧留白: 卡片铺满窗宽的话一行会有一百多个字, 太长读不下去
-        row = QHBoxLayout(self)
-        row.setContentsMargins(0, 0, 0, 0)
-        inner = QWidget()
-        inner.setMaximumWidth(1080)
-        row.addWidget(inner)
-        row.addStretch(1)
+    def refresh(self) -> None:
+        from . import notes as notes_mod
 
-        v = QVBoxLayout(inner)
-        v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(0)
-
-        self.header = QPushButton()
-        self.header.setCursor(Qt.PointingHandCursor)
-        self.header.setStyleSheet(
-            f"QPushButton {{ background: {theme.NOTE_TINT}; color: {theme.INK_MUTED};"
-            f" border: 1px solid {theme.NOTE_LINE}; border-radius: 6px;"
-            f" padding: 5px 12px; text-align: left; font-size: {theme.FS_SMALL}pt;"
-            f" font-weight: 600; letter-spacing: 0.3px; }}"
-            f"QPushButton:hover {{ color: {theme.INK}; }}")
-        self.header.clicked.connect(self.toggle)
-        v.addWidget(self.header)
-
-        self.body = QLabel()
-        self.body.setWordWrap(True)
-        self.body.setTextFormat(Qt.RichText)
-        self.body.setStyleSheet(
-            f"QLabel {{ background: {theme.NOTE_TINT}; border: 1px solid {theme.NOTE_LINE};"
-            f" border-top: none; border-radius: 0 0 6px 6px; padding: 10px 12px 12px 12px; }}")
-        v.addWidget(self.body)
-        self._apply_state()
-
-    # ------------------------------------------------------------------ 内容
-    def set_notes(self, notes: list) -> None:
-        self._notes = list(notes)
-        rows = []
-        for n in self._notes:
-            color, tint = theme.NOTE_LEVEL.get(n.level, (theme.INK_MUTED, theme.PAPER))
-            chip = (f"<span style='background:{tint}; color:{color}; "
-                    f"padding:1px 5px; border-radius:3px; font-weight:600;'>"
-                    f"{theme.NOTE_LABEL.get(n.level, '')}</span>")
-            rows.append(
-                f"<tr><td valign='top' style='padding:0 8px 7px 0; white-space:nowrap;'>{chip}</td>"
-                f"<td valign='top' style='padding:0 0 7px 0; line-height:150%;'>{n.text}</td></tr>")
-        self.body.setText(
-            f"<table cellspacing='0' cellpadding='0'>{''.join(rows)}</table>"
-            if rows else "<i>这一步没有特别要注意的。</i>")
-        self._refresh_header()
-
-    def _refresh_header(self) -> None:
+        self._notes = notes_mod.notes_for(self.page, self.settings)
         n_crit = sum(1 for n in self._notes if n.level == theme.NOTE_CRITICAL)
-        mark = "▸" if self._collapsed else "▾"
-        extra = f"　{n_crit} 条必看" if n_crit else ""
-        self.header.setText(f"{mark}  注意事项 · {len(self._notes)} 条{extra}")
+        mark = "⚠ " if n_crit else ""
+        extra = f" · {n_crit} 必看" if n_crit else ""
+        self.setText(f"{mark}注意事项 {len(self._notes)}{extra}")
+        color = theme.BAD if n_crit else theme.INK_MUTED
+        tint = theme.BAD_TINT if n_crit else theme.NOTE_TINT
+        self.setStyleSheet(
+            f"QPushButton {{ background: {tint}; color: {color};"
+            f" border: 1px solid {theme.NOTE_LINE}; border-radius: 5px;"
+            f" padding: 4px 12px; font-size: {theme.FS_SMALL}pt; font-weight: 600; }}"
+            f"QPushButton:hover {{ border-color: {color}; }}")
+        self.setToolTip(notes_html(self._notes, max_width=560))
+        if self._dialog is not None:
+            self._dialog.set_html(notes_html(self._notes))
 
-    # ------------------------------------------------------------------ 折叠
-    @property
-    def collapsed(self) -> bool:
-        return self._collapsed
+    def open_dialog(self) -> None:
+        if self._dialog is None:
+            self._dialog = InfoDialog(f"注意事项 · {self.page}", notes_html(self._notes), self)
+        self._dialog.set_html(notes_html(self._notes))
+        self._dialog.show()
+        self._dialog.raise_()
+        self._dialog.activateWindow()
 
-    def set_collapsed(self, value: bool) -> None:
-        if value != self._collapsed:
-            self._collapsed = value
-            self._apply_state()
 
-    def toggle(self) -> None:
-        self._collapsed = not self._collapsed
-        self._apply_state()
-        self.toggled.emit(self._collapsed)
-
-    def _apply_state(self) -> None:
-        self.body.setVisible(not self._collapsed)
-        radius = "6px" if self._collapsed else "6px 6px 0 0"
-        self.header.setStyleSheet(self.header.styleSheet().replace(
-            "border-radius: 6px;", f"border-radius: {radius};").replace(
-            "border-radius: 6px 6px 0 0;", f"border-radius: {radius};"))
-        self._refresh_header()
+def scrollable(widget: QWidget) -> QScrollArea:
+    """给页面套一层滚动区 —— 1440p 笔记本上窗口放不下整页内容。"""
+    area = QScrollArea()
+    area.setWidgetResizable(True)
+    area.setFrameShape(QFrame.NoFrame)
+    area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+    area.setWidget(widget)
+    return area
 
 
 class RoleToggle(QPushButton):

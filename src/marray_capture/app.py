@@ -1,7 +1,8 @@
 """入口。
 
-    uv run marray-capture          启动 GUI
-    uv run marray-capture --check  只做环境自检 (不开窗口), 用来在新机器上排查依赖
+    uv run marray-capture               启动 GUI
+    uv run marray-capture --check       环境自检 (不开窗口), 在新机器上排查依赖
+    uv run marray-capture --dump-params 输出采集参数说明的 markdown
 """
 from __future__ import annotations
 
@@ -69,6 +70,10 @@ def _self_check() -> int:
 def main() -> int:
     if "--check" in sys.argv:
         return _self_check()
+    if "--dump-params" in sys.argv:
+        from .gui.notes import params_markdown
+        print(params_markdown())
+        return 0
 
     from PySide6.QtWidgets import QApplication
 

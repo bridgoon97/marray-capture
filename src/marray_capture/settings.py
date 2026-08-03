@@ -71,6 +71,9 @@ class AudioConfig:
     output_gain_db: float = -6.0
     # auto = 同设备走全双工单流, 异设备走分离双流。ASIO 必须全双工 (驱动单实例独占)
     duplex_mode: str = "auto"       # auto | duplex | split
+    # 实际向声卡请求的输入通道数。0 = 自动 (先按用到的最大通道号试, 不行退到全开)。
+    # WASAPI 共享模式只接受端点的完整通道数, 这里会被自动填成声卡的输入通道数。
+    input_channels_override: int = 0
     # 输入通道映射; 录制时会录到 max(index)+1 路再按顺序切片
     channels: list[ChannelMap] = field(default_factory=list)
     # 输出→输入的往返延迟 (样本数)。由「延迟标定」测得; None 表示每次全局搜索

@@ -104,16 +104,66 @@ def test_duplex_records_and_aligns(monkeypatch):
     assert levels, "应该有电平回调"
 
 
-def test_duplex_reports_portaudio_error(monkeypatch):
+def test_open_failure_message_mentions_wasapi(monkeypatch):
     import sounddevice as sd
 
     def boom(**kwargs):
-        raise sd.PortAudioError("Device unavailable")
+        raise sd.PortAudioError("Invalid number of channels")
 
     monkeypatch.setattr(engine_mod.sd, "Stream", boom)
     eng = AudioEngine(AudioConfig(input_device=3, output_device=3, duplex_mode="duplex"))
-    with pytest.raises(engine_mod.EngineError, match="ASIO"):
+    with pytest.raises(engine_mod.EngineError, match="WASAPI"):
         eng.play_record(np.zeros(1000), n_in_channels=4)
+
+
+def test_open_failure_message_mentions_asio_when_asio(monkeypatch):
+    import sounddevice as sd
+
+    from marray_capture.audio import devices as dev
+
+    asio = dev.DeviceInfo(3, "ASIO4ALL", "ASIO", 8, 8, 48000.0)
+    monkeypatch.setattr(dev, "describe", lambda i: asio if i == 3 else None)
+    monkeypatch.setattr(engine_mod.sd, "Stream",
+                        lambda **kw: (_ for _ in ()).throw(sd.PortAudioError("busy")))
+    eng = AudioEngine(AudioConfig(input_device=3, output_device=3, duplex_mode="duplex"))
+    with pytest.raises(engine_mod.EngineError, match="单实例独占"):
+        eng.play_record(np.zeros(1000), n_in_channels=4)
+
+
+def test_input_channel_fallback_to_full_count(monkeypatch):
+    """WASAPI 上请求 5/8 通道会被拒, 应自动退到 8 通道再切片。"""
+    import sounddevice as sd
+
+    from marray_capture.audio import devices as dev
+
+    card = dev.DeviceInfo(0, "8ch", "Windows WASAPI", 8, 2, 48000.0)
+    monkeypatch.setattr(dev, "describe", lambda i: card if i == 0 else None)
+
+    tried: list[int] = []
+
+    class Stream(FakeStream):
+        def __init__(self, device, channels, samplerate, dtype, blocksize,
+                     latency, callback, finished_callback):
+            tried.append(channels[0])
+            if channels[0] != 8:                     # 只接受完整通道数
+                raise sd.PortAudioError("Invalid number of channels")
+            super().__init__(device, channels, samplerate, dtype, blocksize,
+                             latency, callback, finished_callback)
+
+    monkeypatch.setattr(engine_mod.sd, "Stream", Stream)
+    cfg = AudioConfig(input_device=0, output_device=0, samplerate=FS,
+                      duplex_mode="duplex", output_channels=2, blocksize=512)
+    eng = AudioEngine(cfg)
+    rec = eng.play_record(np.zeros(FS), n_in_channels=5, extra_tail_s=0.1, guard_s=0.2)
+
+    assert tried == [5, 8]
+    assert rec.shape[1] == 8                          # 全开, 由上层切片
+    assert cfg.input_channels_override == 8           # 记住了, 下次直接用
+    assert "WASAPI" in eng.last_warnings
+
+    tried.clear()
+    eng.play_record(np.zeros(FS), n_in_channels=5, extra_tail_s=0.1, guard_s=0.2)
+    assert tried == [8], "记住之后不该再试错"
 
 
 # ---------------------------------------------------------------- 通道映射

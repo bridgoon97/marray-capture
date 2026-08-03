@@ -37,14 +37,22 @@ class PlanPage(QWidget):
         self.on_plan_ready = on_plan_ready
         self.plan: Plan | None = None
         self._worker: Worker | None = None
+        self._param_dialog = None
         self._build()
+        self._apply_param_tooltips()
         self.pull()
 
     # ------------------------------------------------------------------ 布局
     def _build(self) -> None:
         outer = QVBoxLayout(self)
-        self.note_card = notes.build_note_card("plan", self.settings)
-        outer.addWidget(self.note_card)
+        self.notes_btn = notes.build_notes_button("plan", self.settings)
+        self.params_btn = QPushButton("参数说明")
+        self.params_btn.clicked.connect(self.show_param_help)
+        bar = QHBoxLayout()
+        bar.addStretch(1)
+        bar.addWidget(self.params_btn)
+        bar.addWidget(self.notes_btn)
+        outer.addLayout(bar)
         root = QHBoxLayout()
         outer.addLayout(root, 1)
         left = QVBoxLayout()
@@ -88,6 +96,9 @@ class PlanPage(QWidget):
         box1 = QGroupBox("采集协议")
         box1.setLayout(f1)
         left.addWidget(box1)
+        left.addStretch(1)
+        root.addLayout(left, 3)
+        mid = QVBoxLayout()
 
         # ---- 扫频
         f2 = QFormLayout()
@@ -111,7 +122,7 @@ class PlanPage(QWidget):
         f2.addRow("播放幅度", self.sp_amp)
         box2 = QGroupBox("扫频信号")
         box2.setLayout(f2)
-        left.addWidget(box2)
+        mid.addWidget(box2)
 
         # ---- 导出
         f3 = QFormLayout()
@@ -131,7 +142,7 @@ class PlanPage(QWidget):
         f3.addRow("", self.ck_retry)
         box3 = QGroupBox("提取与导出")
         box3.setLayout(f3)
-        left.addWidget(box3)
+        mid.addWidget(box3)
 
         # ---- 语音导播
         f4 = QFormLayout()
@@ -154,9 +165,9 @@ class PlanPage(QWidget):
         f4.addRow("状态", self.lb_tts)
         box4 = QGroupBox("语音导播")
         box4.setLayout(f4)
-        left.addWidget(box4)
-        left.addStretch(1)
-        root.addLayout(left, 3)
+        mid.addWidget(box4)
+        mid.addStretch(1)
+        root.addLayout(mid, 3)
 
         self.cb_backend.currentIndexChanged.connect(self.refresh_tts)
         self.ck_tts.toggled.connect(self.refresh_tts)
@@ -188,7 +199,7 @@ class PlanPage(QWidget):
             ["#", "类型", "take_id", "标签", "距离", "高度", "音箱朝向", "指令"])
         self.tbl.horizontalHeader().setSectionResizeMode(7, QHeaderView.Stretch)
         right.addWidget(self.tbl, 1)
-        root.addLayout(right, 5)
+        root.addLayout(right, 4)
 
         self.btn_gen.clicked.connect(self.generate)
         self.btn_tts.clicked.connect(self.prewarm_tts)
@@ -265,6 +276,26 @@ class PlanPage(QWidget):
         self.settings.tts_backend = self.cb_backend.currentData() or "auto"
         self.settings.tts_voice = (self.cb_voice.currentData()
                                    or self.cb_voice.currentText().strip())
+
+    # ------------------------------------------------------------------ 说明
+    def _apply_param_tooltips(self) -> None:
+        """把参数说明挂到各个控件上, 鼠标悬停即可看。"""
+        for attr, grp, name, desc in notes.PARAMS:
+            w = getattr(self, attr, None)
+            if w is None:
+                continue
+            w.setToolTip(f"<b>{name}</b>　<span style='color:#777'>{grp}</span>"
+                         f"<hr style='margin:4px 0'>{desc}")
+
+    def show_param_help(self) -> None:
+        from .widgets import InfoDialog
+
+        if self._param_dialog is None:
+            self._param_dialog = InfoDialog(
+                "采集参数说明", notes.params_html(), self, size=(700, 640))
+        self._param_dialog.show()
+        self._param_dialog.raise_()
+        self._param_dialog.activateWindow()
 
     # ------------------------------------------------------------------ 语音
     def _make_renderer(self) -> PromptRenderer:

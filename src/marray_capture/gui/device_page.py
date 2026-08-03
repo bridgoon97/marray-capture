@@ -47,8 +47,11 @@ class DevicePage(QWidget):
     # ------------------------------------------------------------------ 布局
     def _build(self) -> None:
         outer = QVBoxLayout(self)
-        self.note_card = notes.build_note_card("device", self.settings)
-        outer.addWidget(self.note_card)
+        self.notes_btn = notes.build_notes_button("device", self.settings)
+        bar = QHBoxLayout()
+        bar.addStretch(1)
+        bar.addWidget(self.notes_btn)
+        outer.addLayout(bar)
         root = QHBoxLayout()
         outer.addLayout(root, 1)
 
@@ -380,9 +383,9 @@ class DevicePage(QWidget):
 
     def _refresh_notes(self) -> None:
         """注意事项跟着当前配置走: 选了 ASIO 才提示 ASIO 的坑, 跨设备才提示蓝牙的坑。"""
-        card = getattr(self, "note_card", None)
-        if card is not None:
-            card.set_notes(notes.notes_for("device", self.settings))
+        btn = getattr(self, "notes_btn", None)
+        if btn is not None:
+            btn.refresh()
 
     def _update_channel_summary(self, labels: list[str], mic_cols: list[int]) -> None:
         a = self.settings.audio

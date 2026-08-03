@@ -188,8 +188,8 @@ def test_display_font_size_survives_global_stylesheet(qapp):
     assert card.text.font().pointSize() >= theme.FS_LARGE
 
 
-def test_every_page_has_a_note_card(qapp, settings):
-    """五页都要有注意事项卡, 采集页默认折叠。"""
+def test_every_page_has_a_notes_button(qapp, settings):
+    """五页都要有注意事项按钮, 悬停能看到内容。"""
     import tempfile
 
     from marray_capture.gui.main_window import MainWindow
@@ -201,27 +201,68 @@ def test_every_page_has_a_note_card(qapp, settings):
         "qc": w.page_qc, "post": w.page_post,
     }
     for name, page in pages.items():
-        card = getattr(page, "note_card", None)
-        assert card is not None, f"{name} 页没有注意事项卡"
-        assert card._notes, f"{name} 页的注意事项是空的"
-        assert "注意事项" in card.header.text()
-    assert pages["run"].note_card.collapsed, "采集页的卡片应默认折叠"
-    assert not pages["device"].note_card.collapsed
+        btn = getattr(page, "notes_btn", None)
+        assert btn is not None, f"{name} 页没有注意事项按钮"
+        assert btn._notes, f"{name} 页的注意事项是空的"
+        assert "注意事项" in btn.text()
+        assert "必看" in btn.toolTip()          # 悬停就能读到
 
 
-def test_note_card_collapse_persists(qapp, settings):
+def test_notes_dialog_opens_and_updates(qapp, settings, monkeypatch):
+    from marray_capture.audio import devices as dev
     from marray_capture.gui import notes
 
-    card = notes.build_note_card("qc", settings)
-    assert not card.collapsed
-    card.toggle()
-    assert card.collapsed and settings.notes_collapsed["qc"] is True
-    assert card.header.text().startswith("▸")
-    assert not card.body.isVisibleTo(card)
+    btn = notes.build_notes_button("device", settings)
+    btn.open_dialog()
+    assert btn._dialog is not None and btn._dialog.isVisible()
+    before = btn._dialog.label.text()
 
-    # 重新构造时应恢复折叠状态
-    again = notes.build_note_card("qc", settings)
-    assert again.collapsed
+    asio = dev.DeviceInfo(0, "ASIO4ALL", "ASIO", 8, 8, 48000.0)
+    monkeypatch.setattr(dev, "describe", lambda i: asio if i == 0 else None)
+    settings.audio.input_device = settings.audio.output_device = 0
+    btn.refresh()
+    assert "单实例独占" in btn._dialog.label.text()
+    assert btn._dialog.label.text() != before
+    btn._dialog.close()
+
+
+def test_pages_are_scrollable(qapp, settings):
+    """小屏上内容超出必须能滚, 不能被截断。"""
+    import tempfile
+
+    from PySide6.QtWidgets import QScrollArea
+
+    from marray_capture.gui.main_window import MainWindow
+
+    settings.session_root = tempfile.mkdtemp()
+    w = MainWindow(settings)
+    assert w.width() <= 1280 and w.height() <= 820, "默认窗口对 1440p 笔记本来说太大"
+    for i in range(w.tabs.count()):
+        area = w.tabs.widget(i)
+        assert isinstance(area, QScrollArea), f"第 {i} 页没有套滚动区"
+        assert area.widgetResizable()
+
+
+def test_param_help_covers_plan_widgets(qapp, settings):
+    """参数说明要覆盖到方案页的控件, 并真的挂成 tooltip。"""
+    from marray_capture.gui import notes
+    from marray_capture.gui.plan_page import PlanPage
+
+    page = PlanPage(settings, lambda plan, want_session=False: None)
+    missing = [attr for attr, *_ in notes.PARAMS if getattr(page, attr, None) is None]
+    assert not missing, f"参数说明指向了不存在的控件: {missing}"
+    for attr, _, name, _ in notes.PARAMS:
+        assert name in getattr(page, attr).toolTip()
+
+    # 关键参数不能漏
+    covered = {name for _, _, name, _ in notes.PARAMS}
+    for must in ("每位置扫几次", "扫频前静音（噪声窗）", "重戴次数", "基准圈格数", "播放幅度"):
+        assert must in covered
+
+    page.show_param_help()
+    assert page._param_dialog.isVisible()
+    assert "每位置扫几次" in page._param_dialog.label.text()
+    page._param_dialog.close()
 
 
 def test_device_notes_follow_config(qapp, settings, monkeypatch):

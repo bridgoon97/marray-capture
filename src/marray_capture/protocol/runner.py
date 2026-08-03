@@ -24,7 +24,7 @@ from typing import Callable
 import numpy as np
 
 from ..audio import prompts as P
-from ..audio.engine import AudioEngine, EngineError, slice_channels
+from ..audio.engine import AudioEngine, EngineError, map_levels, slice_channels
 from ..audio.sweep import Sweep, build_excitation, generate_ess
 from ..qc.metrics import FAIL, TakeQC, evaluate_take
 from ..rir.extract import correct_drift, deconvolve_take, extract_take, resample_ir
@@ -92,7 +92,9 @@ class SessionRunner:
         self.renderer = renderer
         self.hooks = hooks or RunnerHooks()
         self.start_index = start_index
-        self.only_take_ids = only_take_ids
+        # 兜底: 上游要是把非集合的东西传进来 (Qt 的 clicked 会塞一个 bool), 当成"全跑"
+        self.only_take_ids = set(only_take_ids) if isinstance(
+            only_take_ids, (set, frozenset, list, tuple)) else None
 
         self.engine = AudioEngine(settings.audio)
         self.sweep = make_sweep(settings)
@@ -205,7 +207,7 @@ class SessionRunner:
             play, n_rec_ch,
             extra_tail_s=st.sweep.max_latency_s + 0.3,
             guard_s=st.sweep.guard_s,
-            level_cb=lambda r: self.hooks.call("on_level", r),
+            level_cb=lambda r: self.hooks.call("on_level", map_levels(r, self.ch_indices)),
         )
         warnings = self.engine.last_warnings
         rec = slice_channels(rec_all, self.ch_indices)
@@ -303,7 +305,7 @@ def calibrate_latency(settings: AppSettings, hooks: RunnerHooks | None = None) -
         exc, settings.audio.n_record_channels(),
         extra_tail_s=settings.sweep.max_latency_s + 0.3,
         guard_s=settings.sweep.guard_s,
-        level_cb=lambda r: hooks.call("on_level", r),
+        level_cb=lambda r: hooks.call("on_level", map_levels(r, indices)),
     )
     rec = slice_channels(rec_all, indices)
     deconv = deconvolve_take(rec, sweep)
@@ -327,6 +329,62 @@ def calibrate_latency(settings: AppSettings, hooks: RunnerHooks | None = None) -
     }
 
 
+def record_reference_ir(settings: AppSettings, session: Session,
+                        hooks: RunnerHooks | None = None) -> dict:
+    """录一条音箱参考 IR（用于去音箱响应）。**整场只需要录一次。**
+
+    它和采集网格无关: 音箱的频响不随位置变化, 所以不用每个角度都录。
+    做法是把测量麦放在音箱正轴约 1 米处, 播一次扫频, 提取 IR 存下来。
+
+    也不需要长期固定某个通道作参考麦 —— 只要录这一条时测量麦插在某个被勾选的通道上,
+    后处理页用「参考通道」挑出那一列即可。若通道表里已经有 `ref` 角色, 会自动选它。
+    """
+    import soundfile as sf
+
+    hooks = hooks or RunnerHooks()
+    engine = AudioEngine(settings.audio)
+    sweep = make_sweep(settings)
+    indices, labels, mic_cols = channel_layout(settings)
+    if not indices:
+        raise EngineError("还没勾选任何输入通道")
+
+    exc, starts = build_excitation(
+        sweep, max(2, settings.sweep.repeats), settings.sweep.preroll_s,
+        settings.sweep.gap_s, settings.sweep.tail_s, settings.sweep.amplitude,
+    )
+    rec_all = engine.play_record(
+        exc, settings.audio.n_record_channels(),
+        extra_tail_s=settings.sweep.max_latency_s + 0.3,
+        guard_s=settings.sweep.guard_s,
+        level_cb=lambda r: hooks.call("on_level", map_levels(r, indices)),
+    )
+    rec = slice_channels(rec_all, indices)
+    deconv = deconvolve_take(rec, sweep)
+    take = extract_take(
+        deconv, sweep, starts, settings.export.ir_pre_ms, settings.export.ir_len_ms,
+        settings.sweep.guard_s + settings.sweep.max_latency_s,
+        energy_channels=None, average=settings.export.average_repeats,
+    )
+
+    ref_cols = [i for i, c in enumerate(settings.audio.ordered_channels()) if c.role == "ref"]
+    fs = settings.audio.samplerate
+    out_dir = session.dir / "ref"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"ref_{datetime.now():%Y%m%d_%H%M%S}.wav"
+    sf.write(str(path), np.asarray(take.ir_avg, dtype=np.float32), fs, subtype="FLOAT")
+
+    return {
+        "path": str(path),
+        "labels": labels,
+        "ref_col": ref_cols[0] if ref_cols else -1,
+        "mic_cols": mic_cols,
+        "fs": fs,
+        "ir": take.ir_avg,
+        "drift_ppm": take.drift_ppm,
+        "warnings": engine.last_warnings,
+    }
+
+
 def measure_ambient(settings: AppSettings, seconds: float = 30.0,
                     session: Session | None = None,
                     hooks: RunnerHooks | None = None) -> dict:
@@ -335,7 +393,7 @@ def measure_ambient(settings: AppSettings, seconds: float = 30.0,
     engine = AudioEngine(settings.audio)
     indices, labels, _ = channel_layout(settings)
     rec_all = engine.record(seconds, settings.audio.n_record_channels(),
-                            level_cb=lambda r: hooks.call("on_level", r))
+                            level_cb=lambda r: hooks.call("on_level", map_levels(r, indices)))
     rec = slice_channels(rec_all, indices)
     fs = settings.audio.samplerate
     levels = 20.0 * np.log10(np.sqrt((rec ** 2).mean(axis=0)) + 1e-12)
