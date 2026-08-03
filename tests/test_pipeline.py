@@ -203,6 +203,43 @@ def test_qc_flags_dead_channel():
     assert any("死通道" in r for r in qc.reasons), qc.summary()
 
 
+def test_locate_peaks_falls_back_when_known_latency_stale():
+    """标定值过期 (实际延迟跟标定差超过 ±50ms) 时, 窄窗搜不到要回退全局窗,
+    不能直接判"找不到峰" —— WASAPI 共享模式启动延迟每次抖几十 ms 很常见,
+    死守窄窗会把好峰误杀。"""
+    sw = generate_ess(FS, 40, 20000, 2.0)
+    exc, starts = build_excitation(sw, 2, 1.0, 0.8, 1.0, 0.5)
+    ir = make_ir()
+    real_lat = int(0.20 * FS)            # 实际延迟 200ms
+    stale_known = int(0.45 * FS)         # 标定值 450ms, 差 250ms >> ±50ms 窗
+    rec = simulate(exc, ir, latency=real_lat, snr_db=50.0, seed=3)
+    deconv = deconvolve_take(rec, sw)
+    peaks, _lat, _drift = locate_peaks(
+        deconv, sw, starts, max_latency_s=1.0,
+        energy_channels=[0, 1, 2], known_latency=stale_known)
+    assert abs((peaks[0] - (starts[0] + sw.ir_offset)) - real_lat) < int(0.01 * FS)
+
+
+def test_stream_warnings_do_not_affect_verdict():
+    """音频流告警 (如 WASAPI 通道数协商) 是后端默认行为, 不该把判定拉到 WARN。"""
+    sw = generate_ess(FS, 40, 20000, 2.0)
+    exc, starts = build_excitation(sw, 2, 1.0, 0.8, 1.0, 0.5)
+    ir = make_ir()
+    rec = simulate(exc, ir, latency=int(0.1 * FS), snr_db=50.0, seed=7)
+    deconv = deconvolve_take(rec, sw)
+    take = extract_take(deconv, sw, starts, 5.0, 200.0, 1.0, energy_channels=[0, 1, 2])
+    qc = evaluate_take(
+        rec=rec, deconv=deconv, ir_list=take.irs, ir_avg=take.ir_avg,
+        peaks=take.direct_indices, latency=take.latency_samples,
+        drift_ppm=take.drift_ppm, starts=starts, sweep_n=sw.n,
+        pre_samples=take.pre_samples, fs=FS,
+        labels=["m1", "m2", "m3"], mic_cols=[0, 1, 2], thr=QCThresholds(),
+        stream_warnings="声卡不接受 7 通道, 已按 8 通道打开再切片",
+    )
+    assert qc.verdict == "PASS", qc.summary()
+    assert not any("音频流告警" in r for r in qc.reasons)
+
+
 def test_qc_catches_movement_between_sweeps():
     """两次扫频之间佩戴者动了 → 一致性指标必须掉下来。"""
     sw = generate_ess(FS, 40, 20000, 2.0)

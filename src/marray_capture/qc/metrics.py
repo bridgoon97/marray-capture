@@ -280,5 +280,5 @@ def _apply_thresholds(qc: TakeQC, thr: QCThresholds, mic_cols: list[int],
     check(abs(qc.repeat_level_diff_db), thr.max_repeat_level_diff_db, False, "两次扫频电平差", " dB")
     check(abs(qc.drift_ppm), thr.max_drift_ppm, False, "时钟漂移", " ppm")
 
-    if qc.stream_warnings:
-        qc.worsen(WARN, f"音频流告警: {qc.stream_warnings}")
+    # stream_warnings (如 WASAPI "声卡不接受 7 通道, 已按 8 通道打开再切片") 是
+    # 后端默认的协商结果, 不是异常 —— 不影响判定, 字符串仍存进 qc 供详情/manifest 查看。

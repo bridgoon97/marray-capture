@@ -411,15 +411,24 @@ class DevicePage(QWidget):
         if getattr(self, "_loading", False):
             return
         a = self.settings.audio
-        a.input_device = self.cb_in.currentData()
-        a.output_device = self.cb_out.currentData()
+        # 输入/输出设备或输出延迟模式一变, 旧的延迟标定值就过期 (往返延迟会跟着变)。
+        # 不清掉的话, 采集会用旧 known_latency 在 ±50ms 窄窗里搜, 真实峰落窗外的
+        # take 会被判"找不到直达峰"。清零后回退到全局窗搜, 标定按钮再跑一次会重填。
+        new_in = self.cb_in.currentData()
+        new_out = self.cb_out.currentData()
+        new_out_lat = self.cb_out_lat.currentText()
+        if (new_in != a.input_device or new_out != a.output_device
+                or new_out_lat != a.output_latency):
+            a.measured_latency_samples = 0
+        a.input_device = new_in
+        a.output_device = new_out
         if self.cb_rate.currentData():
             a.samplerate = int(self.cb_rate.currentData())
         a.blocksize = self.sp_block.value()
         a.output_channels = self.sp_out_ch.value()
         a.output_gain_db = self.sp_gain.value()
         a.input_latency = self.cb_in_lat.currentText()
-        a.output_latency = self.cb_out_lat.currentText()
+        a.output_latency = new_out_lat
         a.duplex_mode = self.cb_duplex.currentData() or "auto"
 
         duplex = AudioEngine(a).use_duplex()

@@ -91,19 +91,25 @@ def locate_peaks(
     fs = sweep.fs
     sub = deconv if energy_channels is None else deconv[:, energy_channels]
     sub_e = (sub ** 2).sum(axis=1)        # 跨通道能量, 算一次复用
-
-    # 第一次: 全局窗搜索 (或用已标定的延迟收窄)
     base = starts[0] + sweep.ir_offset
+    span = int(round(max_latency_s * fs))
+
+    # 第一次: 用标定值窄窗 (若有) 先试, 命中就用; 延迟漂移出 ±50ms 没命中就
+    # 回退全局窗再搜 —— 标定值是上次跑的, 这次实际延迟可能差几十 ms (WASAPI
+    # 共享模式启动抖动), 死守窄窗会把好峰判成"找不到"。
     if known_latency is not None:
         r = int(0.05 * fs)
         first = find_direct_index(sub, expected=base + known_latency, search_radius=r)
         lo, hi = max(0, base + known_latency - r), min(len(sub), base + known_latency + r)
+        if _prominence_db(sub_e[lo:hi], first - lo) < _PROMINENCE_DB:
+            lo, hi = base, min(len(sub), base + span)
+            first = int(lo + np.argmax(sub_e[lo:hi])) if hi > lo else base
     else:
-        span = int(round(max_latency_s * fs))
         lo, hi = base, min(len(sub), base + span)
         first = int(lo + np.argmax(sub_e[lo:hi])) if hi > lo else base
 
-    # 护栏: 窗内峰若不明显高于噪底, 真实直达峰不在窗内, 别静默抓噪声当峰。
+    # 护栏: 全局窗内峰仍不明显高于噪底, 才算真没峰 (设备延迟超 max_latency_s
+    # 或根本没录到信号), 别静默抓噪声当峰。
     if _prominence_db(sub_e[lo:hi], first - lo) < _PROMINENCE_DB:
         raise PeakNotFoundError(
             f"在 {max_latency_s:.2f}s 搜索窗内未找到明显高于噪底的直达峰"
