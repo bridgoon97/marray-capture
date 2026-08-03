@@ -124,6 +124,12 @@ def test_qc_passes_on_clean_take_and_fails_on_noisy():
         if expect_pass:
             assert qc.verdict == "PASS", qc.summary()
             assert qc.repeat_ncc > 0.99
+            # DDR 必须拆成两个分量 (直达峰电平 / 噪底电平), 且比值 = 分子 - 分母。
+            # 光存比值定位不了"哪头坏"; 这里锁住分量与比值的一致性。
+            for ch in qc.channels:
+                assert ch.ir_peak_db == ch.ir_peak_db  # 非 nan
+                assert ch.ir_noise_db == ch.ir_noise_db
+                assert abs(ch.ir_ddr_db - (ch.ir_peak_db - ch.ir_noise_db)) < 1e-6
         else:
             assert qc.verdict == "FAIL", qc.summary()
 

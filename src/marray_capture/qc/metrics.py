@@ -32,6 +32,8 @@ class ChannelQC:
     peak_dbfs: float = float("nan")
     rec_snr_db: float = float("nan")
     ir_ddr_db: float = float("nan")
+    ir_peak_db: float = float("nan")     # IR 直达峰电平 (绝对 dB), DDR 的分子
+    ir_noise_db: float = float("nan")    # 反卷积域噪底电平 (绝对 dB), DDR 的分母
     reliable_bw_hz: float = float("nan")
     rel_level_db: float = 0.0          # 相对参考麦的电平 (查死麦/增益不一致)
 
@@ -189,9 +191,14 @@ def evaluate_take(
 
         ir_c = ir_avg[:, c]
         pk = float(np.max(np.abs(ir_c))) if len(ir_c) else 0.0
+        # 同时存 DDR 的两个分量: 分子 ir_peak_db (直达峰电平)、分母 ir_noise_db
+        # (噪底电平)。比值异常时一眼看出是峰太小 (定位错/扫频没录好) 还是噪底太高
+        # (漂移失配/失真/爆音铺进噪底窗)。光看比值分不清哪头坏。
+        ch.ir_peak_db = _db(pk ** 2)
         if len(dec_noise) > 16:
             n_pow = float((dec_noise[:, c] ** 2).mean())
-            ch.ir_ddr_db = _db(pk ** 2) - _db(n_pow)
+            ch.ir_noise_db = _db(n_pow)
+            ch.ir_ddr_db = ch.ir_peak_db - ch.ir_noise_db
             sig_win = ir_c[pre_samples: pre_samples + early_n]
             ch.reliable_bw_hz = _reliable_bandwidth(sig_win, dec_noise[:, c], fs)
 

@@ -186,11 +186,12 @@ class QCPage(QWidget):
                  f"延迟 {_f(qc.get('latency_ms'))} ms, 漂移 {_f(qc.get('drift_ppm'), 0)} ppm, "
                  f"弥散 {_f(qc.get('smear_ms'), 2)} ms",
                  "<table cellpadding=3><tr><th>通道</th><th>峰值 dBFS</th><th>录音 SNR</th>"
-                 "<th>IR DDR</th><th>可靠带宽</th><th>相对电平</th></tr>"]
+                 "<th>IR 峰</th><th>噪底</th><th>DDR</th><th>可靠带宽</th><th>相对电平</th></tr>"]
         for c in qc.get("channels") or []:
             lines.append(
                 f"<tr><td>{c.get('label','')}</td><td>{_f(c.get('peak_dbfs'))}</td>"
-                f"<td>{_f(c.get('rec_snr_db'))}</td><td>{_f(c.get('ir_ddr_db'))}</td>"
+                f"<td>{_f(c.get('rec_snr_db'))}</td><td>{_f(c.get('ir_peak_db'))}</td>"
+                f"<td>{_f(c.get('ir_noise_db'))}</td><td>{_f(c.get('ir_ddr_db'))}</td>"
                 f"<td>{_f(c.get('reliable_bw_hz'), 0)}</td><td>{_f(c.get('rel_level_db'))}</td></tr>")
         lines.append("</table>")
         if qc.get("reasons"):

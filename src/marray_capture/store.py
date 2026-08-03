@@ -115,7 +115,8 @@ class Session:
             "distance_cm", "height_cm", "speaker_deg", "az_index", "az_nominal_deg", "az_label",
             "stance", "verdict", "reasons", "repeat_ncc", "repeat_level_diff_db",
             "drift_ppm", "latency_ms", "smear_ms", "n_averaged",
-            "min_rec_snr_db", "min_ir_ddr_db", "min_reliable_bw_hz", "max_peak_dbfs",
+            "min_rec_snr_db", "min_ir_ddr_db", "min_ir_peak_db", "max_ir_noise_db",
+            "min_reliable_bw_hz", "max_peak_dbfs",
             "attempt", "timestamp",
         ]
         with open(p, "w", encoding="utf-8-sig", newline="") as f:
@@ -135,6 +136,8 @@ class Session:
                     "smear_ms": _r(qc.get("smear_ms")),
                     "min_rec_snr_db": _r(_agg(chans, "rec_snr_db", min)),
                     "min_ir_ddr_db": _r(_agg(chans, "ir_ddr_db", min)),
+                    "min_ir_peak_db": _r(_agg(chans, "ir_peak_db", min)),
+                    "max_ir_noise_db": _r(_agg(chans, "ir_noise_db", max)),
                     "min_reliable_bw_hz": _r(_agg(chans, "reliable_bw_hz", min)),
                     "max_peak_dbfs": _r(_agg(chans, "peak_dbfs", max)),
                 })
