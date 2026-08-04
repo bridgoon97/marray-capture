@@ -139,9 +139,9 @@ class IRView(QWidget):
         super().__init__(parent)
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
-        self.time_plot = pg.PlotWidget(title="IR 包络 (dB)")
+        self.time_plot = pg.PlotWidget(title="IR 包络 (dBFS)")
         self.time_plot.setLabel("bottom", "时间", units="ms")
-        self.time_plot.setLabel("left", "幅度", units="dB")
+        self.time_plot.setLabel("left", "幅度", units="dBFS")
         self.time_plot.showGrid(x=True, y=True, alpha=0.3)
         self.freq_plot = pg.PlotWidget(title="幅频响应 (早期 50ms)")
         self.freq_plot.setLabel("bottom", "频率", units="Hz")
@@ -186,8 +186,19 @@ class IRView(QWidget):
             env = 20.0 * np.log10(np.abs(x[:, c]) + 1e-12)
             tc = self.time_plot.plot(t, env, pen=pen, name=name)
 
-            m = int(early_ms * 1e-3 * fs)
-            seg = x[:m, c] * np.hanning(min(m, n))[:min(m, n)]
+            m = min(int(early_ms * 1e-3 * fs), n)
+            seg = x[:m, c]
+            # 直达峰在 pre_samples (默认 5 ms) 处, 落在 50 ms hanning 的上升沿
+            # (hanning(0.1)≈0.095), 会被压 ~20 dB —— 全频带于是看着比时域峰低一
+            # 大截, 像"根本没信号"。改成只在直达峰之前的预读静音段和窗尾做渐变,
+            # 直达峰处窗值 = 1, 既抑制截断泄露又不把直达峰压掉。
+            pk = int(np.argmax(np.abs(seg))) if m else 0
+            win = np.ones(m)
+            pad = min(pk, m // 4)
+            if pad > 1:
+                win[:pad] = np.linspace(0.0, 1.0, pad)
+                win[-pad:] = np.linspace(1.0, 0.0, pad)
+            seg = seg * win
             spec = 20.0 * np.log10(np.abs(np.fft.rfft(seg, n=8192)) + 1e-12)
             freqs = np.fft.rfftfreq(8192, 1.0 / fs)
             ok = freqs > 20
