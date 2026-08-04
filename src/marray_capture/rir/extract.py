@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from fractions import Fraction
 
 import numpy as np
-from scipy.signal import resample, resample_poly
+from scipy.signal import find_peaks, resample, resample_poly
 
 from ..audio.sweep import Sweep, deconvolve, find_direct_index
 
@@ -58,6 +58,12 @@ class PeakNotFoundError(RuntimeError):
 # prominence ~18-24 dB; 纯噪底 ~10 dB。30 dB 卡在中间, 两侧都留 6+ dB 余量。
 _PROMINENCE_DB = 30.0
 
+# 后续扫频 onset 判据: 峰相对**局部**基线高出这么多 dB 才算。比第一次的 30 dB
+# 低一档 —— 同一位置两次扫频的直达 prominence 量级相近, 但遮挡可能让第二次稍弱,
+# 留 10 dB 余量; find_peaks 的 prominence 量的是局部高出量, 单样本噪声尖峰过不了
+# 这个门槛 (实测 15~30 dB 都能正确锁到直达, 取 20 dB 兼顾安全与弱信号)。
+_ONSET_PROMINENCE_DB = 20.0
+
 
 def _prominence_db(seg_e: np.ndarray, peak_idx: int) -> float:
     """窗内峰能 vs 中位能 (dB)。真实直达峰 42+ dB; 峰落窗外/纯噪底时 10~24 dB。"""
@@ -68,6 +74,42 @@ def _prominence_db(seg_e: np.ndarray, peak_idx: int) -> float:
     if peak <= 0.0 or med <= 0.0:
         return 0.0
     return 10.0 * np.log10(peak / med)
+
+
+def _locate_subsequent(
+    sub: np.ndarray, sub_e: np.ndarray, expected: int, radius: int, fs: int,
+) -> int:
+    """后续扫频的峰位: 取窗内最早出现的显著峰 (onset), 不取最强的 argmax。
+
+    直达声被头遮挡时, ±radius 窗内的 argmax 会锁到稍晚的反射 (遮挡下反射幅度
+    可能比直达峰还高), 两次扫频的峰位于是差出 1~3ms, 被算成 400~500 ppm 的
+    假漂移并伴生电平差/NCC 掉 —— 看着像"佩戴者动了 / 蓝牙重同步", 实际是 onset
+    没对齐。但直达永远是最近程路径, 反射只会更晚 (反射又是直达的延迟副本,
+    形状相同, 互相关也分不清, 唯一可用的线索是"最早")。改成在 ±radius 窗内用
+    scipy.find_peaks 的 prominence 找峰 —— prominence 量的是峰相对**局部**基线
+    的高出量, 单样本噪声尖峰的 prominence 很低会被滤掉, 不像中位数阈值那样
+    被尖峰骗; 取最早的那个峰 (位置序在前) 即直达。±30ms 窗远小于二次谐波失真
+    产物 (-L·ln(k), 几百 ms), onset 不会误锁到失真产物。
+
+    只要第一次峰是真的 (进这里之前已过 prominence 守卫), 同一位置的第二次
+    直达 prominence 量级相近, onset 必能抓到; 真被埋到 onset 阈值以下, 说明
+    直达本身就埋进噪底了, 回退 argmax、让下游 QC 该判判, 不强抛错。
+    """
+    n = sub.shape[0]
+    lo, hi = max(0, expected - radius), min(n, expected + radius)
+    win = sub_e[lo:hi]
+    if len(win) < 8:
+        return find_direct_index(sub, expected=expected, search_radius=radius)
+    noise = float(np.median(win))
+    if noise <= 0.0:
+        return find_direct_index(sub, expected=expected, search_radius=radius)
+    pk, _ = find_peaks(
+        win, prominence=noise * 10.0 ** (_ONSET_PROMINENCE_DB / 10.0),
+        distance=max(1, int(0.001 * fs)),
+    )
+    if len(pk) == 0:
+        return find_direct_index(sub, expected=expected, search_radius=radius)
+    return lo + int(pk[0])
 
 
 def deconvolve_take(rec: np.ndarray, sweep: Sweep) -> np.ndarray:
@@ -125,7 +167,7 @@ def locate_peaks(
     radius = int(0.03 * fs)                    # 后续扫频只在 ±30ms 内找
     for k in range(1, len(starts)):
         exp = starts[k] + sweep.ir_offset + latency
-        peaks.append(find_direct_index(sub, expected=exp, search_radius=radius))
+        peaks.append(_locate_subsequent(sub, sub_e, exp, radius, fs))
 
     # 漂移: 峰位相对名义间隔的偏移 / 间隔时长
     drift_ppm = 0.0
