@@ -11,3 +11,6 @@ sessions/
 *.wav
 *.flac
 !tests/**/*.wav
+
+# uv 锁文件不进版本库
+uv.lock

@@ -368,6 +368,99 @@ def test_resample_to_16k_preserves_direct_peak():
     assert abs(int(np.argmax(np.abs(ir16[:, 0]))) - 40 // 3) <= 2
 
 
+def test_vpu_weak_under_occlusion_not_misjudged_dead():
+    """VPU 被头挡到峰值 < -50 dBFS 但仍高出本底噪 (rec_snr > 6) 时, 不能判
+    "几乎没信号" 死通道 —— 那是遮挡, 不是断线。真正断线的 VPU 信号 ≈ 噪底,
+    rec_snr ≈ 0, 才该判。
+
+    旧的绝对 -50 dBFS 门限把遮挡下的弱 VPU 误判成"没接", 这条抓它。
+    """
+    sw = generate_ess(FS, 40, 20000, 2.0)
+    exc, starts = build_excitation(sw, 2, 1.0, 0.8, 1.0, 0.5)
+    ir = make_ir(n_ch=4)                      # 前 3 麦, 第 4 路 VPU
+    ir[:, 3] *= 0.01                        # VPU 压到 peak<-50dBFS 但仍高出噪底 (rec_snr>6)
+    rec = simulate(exc, ir, latency=int(0.1 * FS), snr_db=50.0, seed=8)
+    deconv = deconvolve_take(rec, sw)
+    take = extract_take(deconv, sw, starts, 5.0, 200.0, 1.0, energy_channels=[0, 1, 2])
+    qc = evaluate_take(
+        rec=rec, deconv=deconv, ir_list=take.irs, ir_avg=take.ir_avg,
+        peaks=take.direct_indices, latency=take.latency_samples,
+        drift_ppm=take.drift_ppm, starts=starts, sweep_n=sw.n,
+        pre_samples=take.pre_samples, fs=FS,
+        labels=["m1", "m2", "m3", "VPU"], mic_cols=[0, 1, 2], thr=QCThresholds(),
+        vpu_cols=[3],
+    )
+    assert not any("VPU" in r and "几乎没有信号" in r for r in qc.reasons), qc.summary()
+    # 但真死 VPU (压到噪底, rec_snr≈0) 仍要判
+    ir[:, 3] = np.zeros_like(ir[:, 3]) + 1e-8
+    rec2 = simulate(exc, ir, latency=int(0.1 * FS), snr_db=50.0, seed=8)
+    dec2 = deconvolve_take(rec2, sw)
+    take2 = extract_take(dec2, sw, starts, 5.0, 200.0, 1.0, energy_channels=[0, 1, 2])
+    qc2 = evaluate_take(
+        rec=rec2, deconv=dec2, ir_list=take2.irs, ir_avg=take2.ir_avg,
+        peaks=take2.direct_indices, latency=take2.latency_samples,
+        drift_ppm=take2.drift_ppm, starts=starts, sweep_n=sw.n,
+        pre_samples=take2.pre_samples, fs=FS,
+        labels=["m1", "m2", "m3", "VPU"], mic_cols=[0, 1, 2], thr=QCThresholds(),
+        vpu_cols=[3],
+    )
+    assert any("VPU" in r and "几乎没有信号" in r for r in qc2.reasons), qc2.summary()
+
+
+def test_requantify_rescues_occlusion_misjudge(tmp_path):
+    """重新质检机能: 从 raw 录音重跑 deconv→定位→evaluate, 把旧 manifest 的
+    过时判据改回来, 并重存 IR / 重写 manifest / 重出 qc.csv。
+
+    录制时 onset 误锁会把遮挡位置错判 FAIL (假漂移 + NCC 崩); onset 修复后
+    旧 manifest 还是旧判。这里验整条补救链路: 一个实际 PASS 的 take, manifest
+    上误标 FAIL, 重跑后改判 PASS, IR/manifest/qc.csv 都更新。(onset 救回本身
+    由 test_locate_peaks_xcorr_not_argmax_when_occluded 覆盖, 本条聚焦机制。)
+    """
+    import json
+    import soundfile as sf
+    from marray_capture.qc.requantify import requantify_session
+
+    sw = generate_ess(FS, 40, 20000, 3.0)
+    exc, starts = build_excitation(sw, 2, 1.5, 1.2, 1.5, 0.5)
+    ir = make_ir(seed=1)                      # 清晰 IR, 两次扫频用同一条 → 真 PASS
+    rec = simulate(exc, ir, latency=int(0.1 * FS), snr_db=50.0, seed=8)
+
+    sdir = tmp_path / "session_test"
+    (sdir / "raw").mkdir(parents=True)
+    sf.write(str(sdir / "raw" / "take1.flac"),
+             np.clip(rec, -1, 1), FS, subtype="PCM_24", format="FLAC")
+    settings = {
+        "audio": {"samplerate": FS, "channels": [
+            {"index": 0, "role": "mic", "label": "m1", "enabled": True, "order": 1},
+            {"index": 1, "role": "mic", "label": "m2", "enabled": True, "order": 2},
+            {"index": 2, "role": "mic", "label": "m3", "enabled": True, "order": 3}]},
+        "sweep": {"f_start": 40, "f_end": 20000, "duration_s": 3.0, "repeats": 2,
+                  "gap_s": 1.2, "preroll_s": 1.5, "tail_s": 1.5, "guard_s": 0.4,
+                  "fade_in_ms": 15, "fade_out_ms": 40, "max_latency_s": 1.0,
+                  "amplitude": 0.5},
+        "export": {"ir_pre_ms": 5.0, "ir_len_ms": 1022.0, "export_16k": True,
+                   "raw_format": "FLAC", "average_repeats": True, "save_raw": True},
+        "qc": {},
+    }
+    (sdir / "session.json").write_text(
+        json.dumps({"settings": settings}, ensure_ascii=False), encoding="utf-8")
+    row = {"take_id": "take1", "raw_file": "raw/take1.flac",
+           "channels": ["m1", "m2", "m3"], "mic_cols": [0, 1, 2],
+           "latency_samples": int(0.1 * FS), "qc": {"verdict": "FAIL", "reasons": ["旧判"]}}
+    (sdir / "manifest.jsonl").write_text(
+        json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    changed = requantify_session(str(sdir), None, settings, log=lambda *a: None)
+    assert changed == [("take1", "FAIL", "PASS")]
+    rows = json.loads((sdir / "manifest.jsonl").read_text(encoding="utf-8").strip())
+    assert rows["qc"]["verdict"] == "PASS"
+    assert rows["qc"]["repeat_ncc"] > 0.9
+    assert rows["n_averaged"] == 2                          # 一致性过了 → 平均两条
+    assert (sdir / "ir48k" / "take1.wav").exists()           # IR 重存
+    assert (sdir / "ir16k" / "take1.wav").exists()
+    assert (sdir / "qc.csv").exists()                       # qc.csv 重出
+
+
 # ---------------------------------------------------------------------- 方案
 def test_plan_counts_and_labels():
     cfg = ProtocolConfig(

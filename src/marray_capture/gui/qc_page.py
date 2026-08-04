@@ -16,8 +16,9 @@ from PySide6.QtWidgets import (
 
 from ..settings import AppSettings
 from ..store import Session, list_sessions
+from ..qc.requantify import requantify_session
 from . import notes
-from .widgets import IRView, verdict_cell
+from .widgets import IRView, RunnerBridge, Worker, verdict_cell
 
 COLUMNS = ["take_id", "结论", "标签", "距离", "高度", "朝向", "方位",
            "一致性", "电平差 dB", "漂移 ppm", "弥散 ms", "最低 SNR", "最低 DDR", "说明"]
@@ -31,7 +32,10 @@ class QCPage(QWidget):
         self.on_rerun = on_rerun
         self.rows: list[dict] = []
         self._session: Session | None = None
+        self._worker: Worker | None = None
+        self.bridge = RunnerBridge()
         self._build()
+        self.bridge.log.connect(self._on_requantify_log)
 
     def _build(self) -> None:
         root = QVBoxLayout(self)
@@ -44,6 +48,7 @@ class QCPage(QWidget):
         btn_refresh = QPushButton("刷新")
         btn_csv = QPushButton("导出 qc.csv")
         btn_rerun = QPushButton("把选中的位置加入补录")
+        btn_requse = QPushButton("重新质检")
         btn_open = QPushButton("打开会话目录")
         bar.addWidget(QLabel("会话"))
         bar.addWidget(self.cb_session, 2)
@@ -52,6 +57,7 @@ class QCPage(QWidget):
         bar.addWidget(btn_refresh)
         bar.addWidget(btn_csv)
         bar.addWidget(btn_rerun)
+        bar.addWidget(btn_requse)
         bar.addWidget(btn_open)
         bar.addStretch(1)
         bar.addWidget(self.notes_btn)
@@ -83,6 +89,7 @@ class QCPage(QWidget):
         btn_refresh.clicked.connect(self.refresh)
         btn_csv.clicked.connect(self.export_csv)
         btn_rerun.clicked.connect(self.queue_rerun)
+        btn_requse.clicked.connect(self.requantify)
         btn_open.clicked.connect(self.open_dir)
         self.cb_session.currentIndexChanged.connect(self.reload)
         self.cb_filter.currentIndexChanged.connect(self._fill)
@@ -228,6 +235,66 @@ class QCPage(QWidget):
             f"将只跑这 {len(ids)} 个位置 (方案里的调整步仍会播报)。现在切到采集页开始吗?",
         ) == QMessageBox.Yes:
             self.on_rerun(ids)
+
+    def requantify(self) -> None:
+        """用最新 QC 逻辑对已落盘的录音重跑一遍, 改判旧 manifest + 重存 IR。
+
+        修过 QC 逻辑 (如 onset 误锁、VPU 弱信号误判) 之后, 旧 manifest 上的
+        判据是过时的。这里从 raw 重跑, 把误判的位置救回来。选中行只重跑选中
+        的, 没选则重跑全部 (PASS 的重跑不变, 幂等)。
+        """
+        if self._session is None:
+            return
+        import json
+        sess_path = self._session.dir / "session.json"
+        if not sess_path.exists():
+            QMessageBox.warning(self, "重新质检", "session.json 不在, 拿不到配置。")
+            return
+        selected = self.selected_take_ids()
+        if selected:
+            scope = f"选中的 {len(selected)} 个位置"
+            take_ids = selected
+        else:
+            n_fail = sum(1 for r in self.rows if (r.get("qc") or {}).get("verdict") == "FAIL")
+            n_warn = sum(1 for r in self.rows if (r.get("qc") or {}).get("verdict") == "WARN")
+            scope = f"全部 {len(self.rows)} 个位置 (含 {n_fail} FAIL / {n_warn} WARN)"
+            take_ids = None
+        if QMessageBox.question(
+            self, "重新质检",
+            f"对 {scope} 用最新质检逻辑重跑 (从 raw 录音重算, 会覆盖 IR 与 manifest)。\n"
+            "重跑期间别动会话目录。现在开始吗?",
+        ) != QMessageBox.Yes:
+            return
+
+        settings = json.loads(sess_path.read_text(encoding="utf-8")).get("settings", {})
+        self.detail.setPlainText(f"重新质检中… ({scope})")
+        for w in self.findChildren(QPushButton):
+            w.setEnabled(False)
+
+        def log_cb(msg: str) -> None:
+            self.bridge.log.emit(msg)
+
+        self._worker = Worker(requantify_session, str(self._session.dir),
+                              take_ids, settings, log=log_cb)
+        self._worker.done.connect(self._on_requantify_done)
+        self._worker.failed.connect(self._on_requantify_failed)
+        self._worker.start()
+
+    def _on_requantify_log(self, msg: str) -> None:
+        self.detail.append(msg)
+
+    def _on_requantify_done(self, changed: list) -> None:
+        for w in self.findChildren(QPushButton):
+            w.setEnabled(True)
+        n_flip = sum(1 for _o, n in changed if n in ("PASS", "WARN") and _o == "FAIL")
+        self.detail.append(f"完成: 重跑 {len(changed)} 个, 其中 {n_flip} 个 FAIL 改判通过。")
+        self.reload()
+
+    def _on_requantify_failed(self, err: str) -> None:
+        for w in self.findChildren(QPushButton):
+            w.setEnabled(True)
+        QMessageBox.critical(self, "重新质检", err.splitlines()[0])
+        self.detail.append("✗ " + err)
 
     def export_csv(self) -> None:
         if self._session is None:

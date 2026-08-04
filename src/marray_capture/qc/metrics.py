@@ -254,6 +254,14 @@ def _apply_thresholds(qc: TakeQC, thr: QCThresholds, mic_cols: list[int],
     for i, ch in enumerate(qc.channels):
         if ch.peak_dbfs > thr.clip_dbfs:
             qc.worsen(FAIL, f"{ch.label} 削顶 ({ch.peak_dbfs:.1f} dBFS) — 降声卡硬件输入增益")
+        elif i in vpu:
+            # VPU 非声学 (骨导/接触), 绝对电平随佩戴耦合变化大: 耳机被人头一挡,
+            # 信号能掉到 -50 dBFS 以下, 但它仍是活的 (信号高出本底噪十几 dB)。
+            # 用绝对门限会把这种遮挡下的弱 VPU 误判成"没接"。只在信号没高出噪底
+            # (rec_snr 极低) 时才判死通道 —— 真正断线的 VPU 信号 ≈ 噪底, rec_snr ≈ 0。
+            if ch.rec_snr_db == ch.rec_snr_db and ch.rec_snr_db < 6.0:
+                qc.worsen(FAIL, f"{ch.label} VPU 几乎没有信号 (SNR {ch.rec_snr_db:.1f} dB) — "
+                                f"检查接线/佩戴, 或在通道表里取消 VPU 角色")
         elif ch.peak_dbfs < -50.0:
             qc.worsen(FAIL, f"{ch.label} 几乎没有信号 ({ch.peak_dbfs:.1f} dBFS), 疑似死麦或接线问题")
         if i not in vpu:
