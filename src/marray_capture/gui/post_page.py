@@ -189,9 +189,15 @@ class PostPage(QWidget):
         btn_out.clicked.connect(self.pick_out)
         self.btn_run = QPushButton("开始增强")
         self.btn_run.clicked.connect(self.run)
+        self.ck_norm = QCheckBox("全局归一化")
+        self.ck_norm.setToolTip(
+            "导出的 IR 幅值整体偏小时勾上: 取整批所有增强 IR 的全局峰值, 用同一个"
+            " 0.98/peak 标量缩放全部输出。\n"
+            "通道间/位置间的相对电平完全保留 (单一公共标量), 不影响下游 ILD/DRR。")
         bar.addWidget(QLabel("输出"))
         bar.addWidget(self.le_out, 1)
         bar.addWidget(btn_out)
+        bar.addWidget(self.ck_norm)
         bar.addWidget(self.btn_run)
         right.addLayout(bar)
 
@@ -302,6 +308,7 @@ class PostPage(QWidget):
         a["noise"] = {"enable": self.ck_noise.isChecked(),
                       "snr_db": [self.sp_snra.value(), self.sp_snrb.value()]}
         cfg["output"]["num_per_rir"] = self.sp_num.value()
+        cfg["output"]["global_norm"] = self.ck_norm.isChecked()
         return cfg
 
     # ------------------------------------------------------------------ 动作
@@ -403,7 +410,8 @@ class PostPage(QWidget):
         out_dir = self.le_out.text().strip() or str(session.dir / "aug")
         cfg = self._cfg()
         self.log.append(f"输入 {len(inputs)} 条 IR → 每条生成 {cfg['output']['num_per_rir']} 条, "
-                        f"输出 {out_dir}")
+                        f"输出 {out_dir}"
+                        + ("，全局归一化(全批单一标量)" if cfg["output"]["global_norm"] else ""))
         self.pb.setRange(0, len(inputs) * cfg["output"]["num_per_rir"])
         self.btn_run.setEnabled(False)
         eq = self.eq_fir if self.ck_eq.isChecked() else None

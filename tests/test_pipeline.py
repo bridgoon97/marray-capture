@@ -340,6 +340,33 @@ def test_plan_roundtrip(tmp_path):
     assert back.steps[3].instruction == plan.steps[3].instruction
 
 
+def test_plan_rewear_cycles_heights():
+    """重戴圈的高度必须跟着音箱高度列表轮转, 不要停在固定值。
+
+    抓的是静默错误: 若改回固定 rewear_height, 重戴后所有圈都停在同一个高度,
+    高度维度的重戴一致性就测不到了。
+    """
+    cfg = ProtocolConfig(
+        distances_cm=[100], heights_cm=[120, 160, 90],
+        dense_distance_cm=100, dense_height_cm=160, dense_steps=4, sparse_steps=4,
+        speaker_orientations=[0], rewearing_rings=3, rewearing_steps=4,
+        random_positions=0,
+    )
+    plan = build_plan(cfg)
+    rewear = [s for s in plan.steps if s.tag == "rewear" and s.kind == "measure"]
+    # 3 次重戴, 每次圈里 4 个测量位, 各圈高度应依次取 [120, 160, 90]
+    by_ring: list[set[int]] = []
+    cur: set[int] = set()
+    last_wid = None
+    for s in rewear:
+        if last_wid is not None and s.wearing_id != last_wid:
+            by_ring.append(cur); cur = set()
+        cur.add(s.height_cm)
+        last_wid = s.wearing_id
+    by_ring.append(cur)
+    assert [next(iter(r)) for r in by_ring] == [120, 160, 90]
+
+
 # ---------------------------------------------------------------------- 后处理
 def test_speaker_eq_flattens_response():
     """造一个带限 + 有明显斜率的"音箱", 反滤波后通带内应显著更平。"""
@@ -396,3 +423,53 @@ def test_augment_end_to_end(tmp_path):
     assert abs(data[20, 3] - 0.3) < 1e-3
     assert manifest.exists()
     assert len(manifest.read_text(encoding="utf-8").strip().splitlines()) == 2
+
+
+def test_augment_global_norm_preserves_relative_levels(tmp_path):
+    """全局归一化用单一公共标量缩放整批, 不破坏通道间/位置间相对电平。
+
+    抓的是静默错误: 若改成按单条 IR 各自归一, 位置间绝对电平会被抹平,
+    下游 ILD/DRR 就失真了。
+    """
+    import json
+    import soundfile as sf
+    from marray_capture.rir.augment_runner import default_config, run_augment
+
+    fs = 16000
+    rng = np.random.default_rng(0)
+    src = tmp_path / "take.wav"
+    # 两条输入 IR 幅值差 10x; 同一条里 3 个麦也成比例
+    ir = np.zeros((1600, 3))
+    ir[20, 0] = 1.0
+    ir[21, 1] = 0.5
+    ir[22, 2] = 0.25
+    ir[100:400] += rng.normal(0, 0.01, (300, 3))
+    sf.write(str(src), ir.astype(np.float32), fs, subtype="FLOAT")
+
+    cfg = default_config()
+    cfg["output"]["num_per_rir"] = 3
+    cfg["output"]["global_norm"] = True
+    out = tmp_path / "aug"
+    run_augment([(src, [0, 1, 2])], out, cfg)
+
+    files = sorted(out.glob("*.wav"))
+    assert len(files) == 3
+    arrays = [sf.read(str(f), always_2d=True)[0] for f in files]
+
+    # 整批全局峰值应被缩到 ~0.98 (单一公共标量)
+    global_peak = max(float(np.max(np.abs(a))) for a in arrays)
+    assert abs(global_peak - 0.98) < 1e-3
+
+    # 同一条输出里麦间相对量必须与输入一致 (单一标量不破坏相对关系)
+    a = arrays[0]
+    # 取三个麦的直达峰幅值, 比例应为 1 : 0.5 : 0.25
+    peaks = np.array([np.max(np.abs(a[18:24, c])) for c in range(3)])
+    ratio = peaks / peaks[0]
+    assert np.allclose(ratio, [1.0, 0.5, 0.25], atol=2e-2)
+
+    # manifest 里每条都记了同一个标量
+    scales = set()
+    for line in (out / "manifest.jsonl").read_text(encoding="utf-8").splitlines():
+        rec = json.loads(line)
+        scales.add(round(rec["global_norm_scale"], 6))
+    assert len(scales) == 1

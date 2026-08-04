@@ -206,9 +206,13 @@ def build_plan(cfg: ProtocolConfig, seed: int = 2026) -> Plan:
               need_height_setup=(cfg.dense_height_cm != last_height), counter=counter)
         last_height = cfg.dense_height_cm
 
-    # ---- 重戴: 每次摘下重戴后走一个稀疏圈
+    # ---- 重戴: 每次摘下重戴后走一个稀疏圈; 高度跟着音箱高度列表轮转,
+    # 不要固定在一个值 —— 主网格里扫过的每个高度, 重戴时也该再覆盖到, 否则
+    # 重戴后所有圈都停在同一个高度, 高度维度的重戴一致性就测不到了。
+    heights = cfg.heights_cm or [cfg.rewearing_height_cm]
     for w in range(cfg.rewearing_rings):
         wid = f"{cfg.wearing_id}r{w + 1}"
+        height = heights[w % len(heights)]
         counter[0] += 1
         steps.append(Step(
             idx=counter[0], kind="setup",
@@ -219,10 +223,10 @@ def build_plan(cfg: ProtocolConfig, seed: int = 2026) -> Plan:
             settle_s=cfg.setup_settle_s, tag="rewear",
             subject_id=cfg.subject_id, wearing_id=wid, side=cfg.side,
         ))
-        _ring(steps, cfg, cfg.rewearing_distance_cm, cfg.rewearing_height_cm, 0,
+        _ring(steps, cfg, cfg.rewearing_distance_cm, height, 0,
               cfg.rewearing_steps, "rewear", wid,
-              need_height_setup=(cfg.rewearing_height_cm != last_height), counter=counter)
-        last_height = cfg.rewearing_height_cm
+              need_height_setup=(height != last_height), counter=counter)
+        last_height = height
 
     # ---- 随机抖动位: 给粗方向 + 粗距离 + 姿势, 打破整齐栅格
     if cfg.random_positions > 0:

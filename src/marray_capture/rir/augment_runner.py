@@ -132,6 +132,13 @@ def run_augment(
     total = len(inputs) * n_per
     done = 0
 
+    # 全批单一标量归一化: 先攒着所有输出 IR, 算出整批的全局峰值, 再用同一个
+    # 0.98/peak 标量写出。通道间/位置间的绝对电平关系是 ILD/DRR 的依据, 单一
+    # 公共标量只做整体缩放、不破坏相对关系 —— 与 AGENTS.md「IR 一律不做峰值归一」
+    # 的本意(反对按单条 IR 各自归一)不冲突。
+    global_norm = bool(cfg.get("output", {}).get("global_norm"))
+    pending: list[tuple[str, np.ndarray, dict]] = [] if global_norm else []
+
     with open(manifest, "w", encoding="utf-8") as mf:
         for path, mic_cols in inputs:
             if should_stop and should_stop():
@@ -168,13 +175,30 @@ def run_augment(
                     full[:n, col] = data[:n, col]
 
                 name = f"{path.stem}_aug{k:03d}.wav"
-                sf.write(str(out_root / name), full.astype(np.float32), fs, subtype="FLOAT")
-                mf.write(json.dumps({
+                rec = {
                     "file": name, "source": path.name,
                     "mic_cols": cols, "passthrough_cols": others,
                     **params,
-                }, ensure_ascii=False) + "\n")
+                }
+                if global_norm:
+                    pending.append((name, full, rec))
+                else:
+                    sf.write(str(out_root / name), full.astype(np.float32), fs, subtype="FLOAT")
+                    mf.write(json.dumps(rec, ensure_ascii=False) + "\n")
                 done += 1
                 if progress:
                     progress(done, total, name)
+
+        if global_norm and pending:
+            peak = 0.0
+            for _, full, _ in pending:
+                p = float(np.max(np.abs(full)))
+                if p > peak:
+                    peak = p
+            scale = 0.98 / peak if peak > 0 else 1.0
+            for name, full, rec in pending:
+                rec["global_norm_scale"] = scale
+                sf.write(str(out_root / name), (full * scale).astype(np.float32),
+                         fs, subtype="FLOAT")
+                mf.write(json.dumps(rec, ensure_ascii=False) + "\n")
     return manifest
