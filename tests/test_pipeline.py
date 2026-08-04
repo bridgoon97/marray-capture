@@ -220,41 +220,58 @@ def test_locate_peaks_falls_back_when_known_latency_stale():
     assert abs((peaks[0] - (starts[0] + sw.ir_offset)) - real_lat) < int(0.01 * FS)
 
 
-def test_locate_peaks_onset_not_argmax_when_occluded():
-    """第二次扫频的直达被头遮挡 (弱)、稍晚的反射相对更强时, 必须锁到最早的
-    直达 onset, 不能让 ±30ms 窗的 argmax 锁到反射。
+def test_locate_peaks_xcorr_not_argmax_when_occluded():
+    """第二次扫频的直达被头遮挡 (弱)、稍晚的反射相对更强时, 必须锁到真直达,
+    不能让 ±30ms 窗的 argmax 锁到反射。
 
     抓的是静默错误: argmax 锁到反射会让两次峰位差 1~3ms, 被算成 400~500 ppm
     的假漂移并伴生电平差/NCC 掉 —— 看着像"佩戴者动了 / 蓝牙重同步", 实际是
-    onset 没对齐。反射是直达的延迟副本, 形状相同, 互相关也分不清, 唯一可用
-    的线索是"直达最早"。
+    onset 没对齐。实测数据 (20260804 会话) 上 argmax 报 521/-446 ppm, 但按
+    名义位置切 IR 算 NCC=0.99 —— 真漂移其实 ~0。
 
-    复现: 直接构造反卷积域 —— sweep1 直达强, sweep2 直达弱 (+1.4ms 处反射
-    反而更强), 两次真实峰位相同 (无漂移)。argmax 会把 peak1 报到反射处 →
-    假漂移 ~498 ppm; onset 取最早峰 → peak1 报到真直达 → 0 ppm。
+    修复用第一次扫频直达峰段做模板互相关: 直达对齐时两次扫频共享的全部早反射
+    同时对上, 总相关最高, 单个强反射 (哪怕幅度更大) 拼不过。反射的邻域与直达
+    邻域不同 —— 这是比"幅度"和"最早"都稳的线索 (onset 取最早会被直达前的反射
+    骗, 实测过)。
+
+    复现用真实感 IR (直达 + 多个带尾的早反射), 第二次只把直达压到 -22 dB 模拟
+    头遮挡, 反射和尾不动。无真实漂移。argmax 会锁反射报大漂移, 互相关锁真直达。
     """
-    sw = generate_ess(FS, 40, 20000, 2.0)
-    _exc, starts = build_excitation(sw, 2, 1.0, 0.8, 1.0, 0.5)
-    lat = int(0.10 * FS)
-    p0 = starts[0] + sw.ir_offset + lat
-    p1 = starts[1] + sw.ir_offset + lat
-    deconv = np.zeros((p1 + 6000, 1))
-    delay_refl = 67                              # ~1.4ms
-    # sweep1 清晰: 直达 1.0, 反射 0.12
-    deconv[p0, 0] = 1.0
-    deconv[p0 + delay_refl, 0] = 0.12
-    # sweep2 被头遮挡: 直达弱 0.06, 反射 0.5 (反射比直达还强)
-    deconv[p1, 0] = 0.06
-    deconv[p1 + delay_refl, 0] = 0.5
-    rng = np.random.default_rng(0)
-    deconv += rng.normal(0, 0.002, deconv.shape)
+    sw = generate_ess(FS, 40, 20000, 3.0)
+    exc, starts = build_excitation(sw, 2, 1.5, 1.2, 1.5, 0.5)
+    nominal = starts[1] - starts[0]
+    rng = np.random.default_rng(1)
 
+    def make_ir(att: float) -> np.ndarray:
+        # 直达 + 6 个早反射 + 指数噪底; 反射/尾在两次扫频间不变, 只直达被压
+        ir = np.zeros((4000, 3))
+        for c in range(3):
+            ir[40, c] = 1.0 * att
+            for _ in range(6):
+                k = int(rng.integers(60, 900))
+                ir[k, c] += rng.normal(0, 0.25)
+            t = np.arange(4000) / FS
+            ir[:, c] += rng.normal(0, 0.02, 4000) * np.exp(-t / 0.12)
+        return ir
+
+    ir_clear = make_ir(att=1.0)
+    ir_occl = make_ir(att=0.08)          # 直达压 -22 dB, 模拟头遮挡
+    lat = int(0.10 * FS)
+    rec = np.zeros((lat + len(exc) + 4000 + nominal, 3))
+    for c in range(3):
+        s1 = fftconvolve(exc, ir_clear[:, c])[: len(exc) + 4000]
+        s2 = fftconvolve(exc, ir_occl[:, c])[: len(exc) + 4000]
+        rec[lat:lat + len(s1), c] += s1
+        rec[lat + nominal:lat + nominal + len(s2), c] += s2
+    rec = rec / (abs(rec).max()) * 0.25
+
+    deconv = deconvolve_take(rec, sw)
     peaks, _lat, drift = locate_peaks(
-        deconv, sw, starts, max_latency_s=1.0, energy_channels=[0])
-    # peak0 在 sweep1 上也应准 (清晰, argmax=onset)
-    assert peaks[0] == p0
-    # peak1 必须锁到真直达 p1, 不是反射 p1+67 —— 这是本条要防的静默错误
-    assert peaks[1] == p1, f"onset 锁偏到反射 ({peaks[1] - p1} 样本), 假漂移 {drift:.0f} ppm"
+        deconv, sw, starts, max_latency_s=1.5, energy_channels=[0, 1, 2])
+    true_p1 = starts[1] + sw.ir_offset + lat + 40
+    # argmax 会锁到反射 (实测 -637 样本); 互相关必须锁到真直达 (±几样本)
+    err = peaks[1] - true_p1
+    assert abs(err) <= 3, f"onset 锁偏 {err} 样本 (argmax 会锁反射); 假漂移 {drift:.0f} ppm"
     assert abs(drift) < 50.0, f"无真实漂移却报 {drift:.0f} ppm (argmax 锁反射了)"
 
 

@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from fractions import Fraction
 
 import numpy as np
-from scipy.signal import find_peaks, resample, resample_poly
+from scipy.signal import resample, resample_poly
 
 from ..audio.sweep import Sweep, deconvolve, find_direct_index
 
@@ -58,12 +58,6 @@ class PeakNotFoundError(RuntimeError):
 # prominence ~18-24 dB; 纯噪底 ~10 dB。30 dB 卡在中间, 两侧都留 6+ dB 余量。
 _PROMINENCE_DB = 30.0
 
-# 后续扫频 onset 判据: 峰相对**局部**基线高出这么多 dB 才算。比第一次的 30 dB
-# 低一档 —— 同一位置两次扫频的直达 prominence 量级相近, 但遮挡可能让第二次稍弱,
-# 留 10 dB 余量; find_peaks 的 prominence 量的是局部高出量, 单样本噪声尖峰过不了
-# 这个门槛 (实测 15~30 dB 都能正确锁到直达, 取 20 dB 兼顾安全与弱信号)。
-_ONSET_PROMINENCE_DB = 20.0
-
 
 def _prominence_db(seg_e: np.ndarray, peak_idx: int) -> float:
     """窗内峰能 vs 中位能 (dB)。真实直达峰 42+ dB; 峰落窗外/纯噪底时 10~24 dB。"""
@@ -77,39 +71,44 @@ def _prominence_db(seg_e: np.ndarray, peak_idx: int) -> float:
 
 
 def _locate_subsequent(
-    sub: np.ndarray, sub_e: np.ndarray, expected: int, radius: int, fs: int,
+    sub: np.ndarray, ref_peak: int, expected: int, radius: int, fs: int,
 ) -> int:
-    """后续扫频的峰位: 取窗内最早出现的显著峰 (onset), 不取最强的 argmax。
+    """后续扫频的峰位: 用第一次扫频直达峰段做模板互相关, 不用窄窗 argmax。
 
-    直达声被头遮挡时, ±radius 窗内的 argmax 会锁到稍晚的反射 (遮挡下反射幅度
-    可能比直达峰还高), 两次扫频的峰位于是差出 1~3ms, 被算成 400~500 ppm 的
-    假漂移并伴生电平差/NCC 掉 —— 看着像"佩戴者动了 / 蓝牙重同步", 实际是 onset
-    没对齐。但直达永远是最近程路径, 反射只会更晚 (反射又是直达的延迟副本,
-    形状相同, 互相关也分不清, 唯一可用的线索是"最早")。改成在 ±radius 窗内用
-    scipy.find_peaks 的 prominence 找峰 —— prominence 量的是峰相对**局部**基线
-    的高出量, 单样本噪声尖峰的 prominence 很低会被滤掉, 不像中位数阈值那样
-    被尖峰骗; 取最早的那个峰 (位置序在前) 即直达。±30ms 窗远小于二次谐波失真
-    产物 (-L·ln(k), 几百 ms), onset 不会误锁到失真产物。
+    直达声被头遮挡时, ±radius 窗内的 argmax 会锁到稍晚/稍早的反射 (遮挡下
+    反射幅度可能比直达峰还高), 两次扫频的峰位差 1~3ms, 被算成 400~500 ppm 的
+    假漂移并伴生电平差/NCC 掉 —— 看着像"佩戴者动了 / 蓝牙重同步", 实际是
+    onset 没对齐。实测: 同一位置两次扫频的真实直达在名义位置 ±0, 而 argmax
+    锁到 ±90~105 样本处的反射, 报 521/-446 ppm, 但按名义位置切 IR 算 NCC=0.99。
 
-    只要第一次峰是真的 (进这里之前已过 prominence 守卫), 同一位置的第二次
-    直达 prominence 量级相近, onset 必能抓到; 真被埋到 onset 阈值以下, 说明
-    直达本身就埋进噪底了, 回退 argmax、让下游 QC 该判判, 不强抛错。
+    改成拿第一次扫频直达峰前后 ±1ms 当模板, 在期望位置 ±radius 内做互相关:
+    直达对齐时两次扫频**共享的全部早反射**同时对上, 总相关最高, 单个强反射
+    (哪怕幅度更大) 拼不过; 反射的邻域与直达邻域不同, 区别于幅度。互相关是
+    相位感知 + 跨通道求和, 比能量 argmax / 单样本 onset 都稳。±30ms 窗远小于
+    二次谐波失真产物 (-L·ln(k), 几百 ms), 不会误锁到失真产物。
+
+    只要第一次峰是真的 (进这里之前已过 prominence 守卫), 模板就是有效的。
     """
     n = sub.shape[0]
-    lo, hi = max(0, expected - radius), min(n, expected + radius)
-    win = sub_e[lo:hi]
-    if len(win) < 8:
+    half = max(2, int(0.001 * fs))                 # 模板 ±1ms: 直达峰 + 紧邻
+    ref_lo, ref_hi = max(0, ref_peak - half), min(n, ref_peak + half)
+    ref = sub[ref_lo:ref_hi]
+    peak_in_ref = ref_peak - ref_lo                 # 直达峰在模板里的下标
+    if len(ref) < 4 or np.linalg.norm(ref) <= 0.0:
         return find_direct_index(sub, expected=expected, search_radius=radius)
-    noise = float(np.median(win))
-    if noise <= 0.0:
+
+    seg_lo = max(0, expected - radius)
+    seg_hi = min(n, expected + radius + len(ref))
+    seg = sub[seg_lo:seg_hi]
+    if len(seg) < len(ref):
         return find_direct_index(sub, expected=expected, search_radius=radius)
-    pk, _ = find_peaks(
-        win, prominence=noise * 10.0 ** (_ONSET_PROMINENCE_DB / 10.0),
-        distance=max(1, int(0.001 * fs)),
-    )
-    if len(pk) == 0:
-        return find_direct_index(sub, expected=expected, search_radius=radius)
-    return lo + int(pk[0])
+
+    # 跨通道求和的 valid 互相关。多通道相位一致, 比单通道或能量 argmax 更难被骗。
+    cc = np.zeros(len(seg) - len(ref) + 1, dtype=float)
+    for c in range(sub.shape[1]):
+        cc += np.correlate(seg[:, c], ref[:, c], mode="valid")
+    lag = int(np.argmax(cc))
+    return seg_lo + lag + peak_in_ref
 
 
 def deconvolve_take(rec: np.ndarray, sweep: Sweep) -> np.ndarray:
@@ -167,7 +166,7 @@ def locate_peaks(
     radius = int(0.03 * fs)                    # 后续扫频只在 ±30ms 内找
     for k in range(1, len(starts)):
         exp = starts[k] + sweep.ir_offset + latency
-        peaks.append(_locate_subsequent(sub, sub_e, exp, radius, fs))
+        peaks.append(_locate_subsequent(sub, first, exp, radius, fs))
 
     # 漂移: 峰位相对名义间隔的偏移 / 间隔时长
     drift_ppm = 0.0
