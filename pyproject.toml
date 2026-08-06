@@ -24,6 +24,7 @@ tts = ["piper-tts>=1.2.0", "edge-tts>=6.1.9"]
 
 [project.scripts]
 marray-capture = "marray_capture.app:main"
+rir-augment-ui = "marray_capture.rir_aug_ui.app:main"
 
 [build-system]
 requires = ["hatchling"]
