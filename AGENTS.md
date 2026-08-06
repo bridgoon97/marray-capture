@@ -23,6 +23,7 @@ uv sync --extra tts                 # 装依赖（tts 是可选组：piper + edg
 uv run marray-capture               # 启动 GUI
 uv run marray-capture --check       # 环境自检：列声卡设备 + TTS 后端可用性
 uv run marray-capture --dump-params # 输出参数说明 markdown（见下方「单一真源」）
+uv run rir-augment-ui               # 独立混响增强 GUI：裸 wav 目录 → 每条加 N 个混响尾
 uv run pytest -q                    # 全部测试，不需要声卡、不联网
 uv run pyflakes src tests           # 静态检查
 ```
@@ -62,6 +63,7 @@ w.grab().save("/tmp/ui.png")
 | `rir/speaker_eq.py` | 去音箱响应（最小相位反滤波器） |
 | `rir/augment_runner.py` | 混响随机增强的批处理 |
 | `rir/rir_augment/` | **vendored**，来自作者的 `rir-augment` 项目，见下 |
+| `rir_aug_ui/` | 独立混响增强工具（`uv run rir-augment-ui`）。**共享 `rir/augment_runner` 核心**，入口是裸 wav 目录，不要会话/质检/manifest；自说话阵列 IR 的所有通道都当麦克风 |
 | `store.py` | 会话目录与 manifest |
 | `gui/theme.py` | 设计 token + QSS。改配色/字号只改这里 |
 | `gui/widgets.py` | 通用控件（电平表、IR 图、指令卡、注意事项按钮…） |
@@ -293,11 +295,22 @@ uv run marray-capture --dump-params > docs/protocol-params.md
 1. 只对麦克风通道合成扩散尾，VPU 等非声学通道保留实测原样
 2. 按质检结论筛输入，FAIL 的位置不进增强
 
+**独立工具 `rir_aug_ui`**：与主程序后处理页**共用** `rir/augment_runner.run_augment`，
+不 vendored 第二份核心 —— 改扩散尾/相干性逻辑只改一处。它与后处理页的三点**有意的**
+差异，改动时别丢：
+1. 入口是裸 wav 目录，没有 session manifest，也**不做质检筛选**（这批 IR 是之前录好的，
+   没有QC结论可用；自说话数据默认全收）
+2. 所有通道都当麦克风（自说话阵列 IR 没有 VPU 这类非声学通道），mic_cols 取
+   `range(n_ch)`；通道数与几何不符时复用 `run_augment` 的几何校验报错
+3. 不做去音箱响应（`eq_fir=None`）。早/晚分界默认压到 20 ms —— 这批自说话 IR 只有
+   几百样本（10~30 ms），50 ms 默认比整条还长；`split_early_late` 本就会截到 IR
+   长度内，短 IR 整条当早期段保留
+
 ---
 
 ## 测试
 
-`tests/` 下 69 个用例，**不需要声卡、不联网**。手法：
+`tests/` 下 72 个用例，**不需要声卡、不联网**。手法：
 
 - **仿真信号**：已知 IR → 卷积 → 加噪 → 走真实的反卷积/提取/质检链路，比对还原度
 - **替身声卡**：`FakeStream` / `FakeEngine` 驱动真实的回调逻辑
